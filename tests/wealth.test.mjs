@@ -340,6 +340,25 @@ test("端到端核验：安全认证、权限隔离、防敏感卡号、资产�
   const bobAfterDup = (await bob.request("/api/dashboard")).data;
   assert.equal(bobAfterDup.stockpileItems.length, 1);
 
+  // 验证 Vercel Cron 每日自动兜底快照：未带授权标识拦截 401；跨日未更新股票时当日盈亏自动按 0 归档
+  const unauthCron = await fetch(`${baseUrl}/api/cron/daily-snapshot?date=2026-11-27`);
+  assert.equal(unauthCron.status, 401);
+
+  const okCron = await fetch(`${baseUrl}/api/cron/daily-snapshot?date=2026-11-27`, {
+    headers: { "User-Agent": "vercel-cron/1.0" },
+  });
+  assert.equal(okCron.status, 200);
+  const cronJson = await okCron.json();
+  assert.equal(cronJson.processedUsers, 2);
+
+  const aliceAfterCron = (await alice.request("/api/dashboard?date=2026-11-27")).data;
+  const snap27 = aliceAfterCron.snapshots.find((s) => s.snapshot_date === "2026-11-27");
+  assert.ok(snap27);
+  assert.equal(snap27.net_worth_cents, 19520000);
+  assert.equal(snap27.net_worth_change_cents, 0);
+  assert.equal(snap27.daily_investment_pnl_cents, 0);
+  assert.equal(snap27.note, "自动归档");
+
   // 验证 Vercel Serverless Rewrite 入口 (/api/index?__path=auth/status)
   const vercelSimServer = http.createServer((req, res) => vercelHandler(req, res));
   await new Promise((resolve) => vercelSimServer.listen(0, "127.0.0.1", resolve));

@@ -245,6 +245,24 @@ export async function handleApiRequest(req, res, urlObj) {
       return sendJson(res, 200, { ok: true }, { "Set-Cookie": clearCookie });
     }
 
+    // 4.5 每日自动兜底快照定时接口（供 Vercel Cron 每晚 23 点档触发）
+    if (pathname === "/api/cron/daily-snapshot" && method === "GET") {
+      const cronSecret = process.env.CRON_SECRET;
+      const authHeader = String(req.headers.authorization || "");
+      const ua = String(req.headers["user-agent"] || "");
+      const authorized = cronSecret
+        ? authHeader === `Bearer ${cronSecret}`
+        : ua.includes("vercel-cron") || req.headers["x-internal-cron"] === "1";
+
+      if (!authorized) {
+        return sendJson(res, 401, { error: "未授权的定时任务请求" });
+      }
+
+      const dateParam = searchParams.get("date") || undefined;
+      const result = await runAutoDailySnapshots(dateParam);
+      return sendJson(res, 200, { ok: true, ...result });
+    }
+
     // === 以下所有接口均强制要求已登录，并严格按 user.id 隔离个人数据 ===
     const user = await getUserFromRequest(req);
     if (!user) {
@@ -1100,15 +1118,61 @@ export async function handleApiRequest(req, res, urlObj) {
   }
 }
 
-export async function captureSnapshotForDate(user, snapshotDate, note) {
+export async function runAutoDailySnapshots(targetDate) {
+  const db = await getDb();
+  const snapshotDate = targetDate || getLocalDateString();
+  const users = await db.all(
+    "SELECT id, username, stockpile_valuation_mode, monthly_budget_cents FROM users"
+  );
+  for (const u of users) {
+    await captureSnapshotForDate(u, snapshotDate, "", { isAuto: true });
+  }
+  return { date: snapshotDate, processedUsers: users.length };
+}
+
+export async function captureSnapshotForDate(user, snapshotDate, note, options = {}) {
+  const isAuto = Boolean(options.isAuto);
   const payload = await getDashboardPayload(user, snapshotDate);
-  const { metrics, fundAccounts, creditAccounts } = payload;
+  const { metrics, fundAccounts, creditAccounts, snapshots } = payload;
+
+  const existingSnap = snapshots.find((s) => s.snapshot_date === snapshotDate);
+
+  // 自动快照时，仅统计 updated_at 为当天的股票/基金当日盈亏，避免把前一日盈亏跨日重复记入
+  let effectiveInvestmentPnlCents = metrics.dailyInvestmentPnlCents;
+  if (isAuto) {
+    let todayUpdatedPnl = 0;
+    let anyUpdatedToday = false;
+    for (const f of fundAccounts) {
+      if (f.category === "stock" || f.category === "fund") {
+        if (String(f.updated_at || "").slice(0, 10) === snapshotDate) {
+          todayUpdatedPnl += Number(f.daily_pnl_cents);
+          anyUpdatedToday = true;
+        }
+      }
+    }
+    if (existingSnap && existingSnap.note !== "自动归档" && !anyUpdatedToday) {
+      effectiveInvestmentPnlCents = Number(existingSnap.daily_investment_pnl_cents);
+    } else {
+      effectiveInvestmentPnlCents = todayUpdatedPnl;
+    }
+  }
+
+  let finalNote = note;
+  if (isAuto) {
+    finalNote = existingSnap ? existingSnap.note || "" : "自动归档";
+  } else if (!note && existingSnap) {
+    finalNote = existingSnap.note === "自动归档" ? "" : existingSnap.note || "";
+  }
+
   const detailJson = JSON.stringify({
     funds: fundAccounts.map((f) => ({
       name: f.name,
       category: f.category,
       balance_cents: f.balance_cents,
-      daily_pnl_cents: f.daily_pnl_cents,
+      daily_pnl_cents:
+        isAuto && String(f.updated_at || "").slice(0, 10) !== snapshotDate
+          ? 0
+          : f.daily_pnl_cents,
     })),
     debts: creditAccounts.map((c) => ({
       bank_or_platform: c.bank_or_platform,
@@ -1140,7 +1204,7 @@ export async function captureSnapshotForDate(user, snapshotDate, note) {
       wool_daily_balance_cents = excluded.wool_daily_balance_cents,
       daily_expense_cents = excluded.daily_expense_cents,
       detail_json = excluded.detail_json,
-      note = CASE WHEN excluded.note != '' THEN excluded.note ELSE daily_snapshots.note END,
+      note = excluded.note,
       updated_at = excluded.updated_at`,
     [
       user.id,
@@ -1152,11 +1216,11 @@ export async function captureSnapshotForDate(user, snapshotDate, note) {
       metrics.stockpileActiveValueCents,
       metrics.valuationMode,
       metrics.netWorthCents,
-      metrics.dailyInvestmentPnlCents,
+      effectiveInvestmentPnlCents,
       metrics.woolTodayBalanceCents,
       metrics.expenseTodayCents,
       detailJson,
-      note,
+      finalNote,
       now,
     ]
   );

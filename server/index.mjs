@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { getSessionSecret } from "./auth.mjs";
 import { getDb } from "./db.mjs";
 import { loadEnvFile } from "./env.mjs";
-import { handleApiRequest } from "./routes.mjs";
+import { getNowTimestampString } from "./money.mjs";
+import { handleApiRequest, runAutoDailySnapshots } from "./routes.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, "../public");
@@ -75,6 +76,24 @@ if (isMain) {
   const host = process.env.HOST || "127.0.0.1";
   await getDb();
   const server = createAppServer();
+
+  // 本地或 Docker 常驻模式下：每晚北京时间 23:50 自动兜底生成全部用户当日快照
+  let lastAutoDate = "";
+  const timer = setInterval(async () => {
+    try {
+      const nowStr = getNowTimestampString();
+      const datePart = nowStr.slice(0, 10);
+      const hhmm = nowStr.slice(11, 16);
+      if (hhmm === "23:50" && lastAutoDate !== datePart) {
+        lastAutoDate = datePart;
+        await runAutoDailySnapshots(datePart);
+      }
+    } catch (err) {
+      console.error("自动快照任务异常:", err);
+    }
+  }, 30 * 1000);
+  timer.unref();
+
   server.listen(port, host, () => {
     console.log(`Personal Ledger 已启动: http://${host}:${port}`);
   });

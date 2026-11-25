@@ -585,7 +585,7 @@ function renderOverviewTab(container) {
       <div class="card-header">
         <div>
           <h2 class="card-title">每日资产快照记录</h2>
-          <p class="card-subtitle">同一天多次保存将自动覆盖更新当日快照，并自动校准前后日期差额</p>
+          <p class="card-subtitle">同日多次保存自动覆盖更新；每晚 23 点档系统将自动兜底归档当日快照（未当日更新的投资盈亏自动按 0 计）</p>
         </div>
       </div>
       ${
@@ -613,10 +613,19 @@ function renderOverviewTab(container) {
                       (s) => `
                     <tr>
                       <td class="num" style="font-weight:500;color:var(--ink);">
-                        ${escapeHtml(s.snapshot_date)}
+                        <div>
+                          ${escapeHtml(s.snapshot_date)}
+                          ${
+                            s.snapshot_date === today
+                              ? `<span class="pill pill-neutral" style="margin-left:6px;padding:1px 7px;font-size:11px;">今日</span>`
+                              : ""
+                          }
+                        </div>
                         ${
-                          s.snapshot_date === today
-                            ? `<span class="pill pill-neutral" style="margin-left:6px;padding:1px 7px;font-size:11px;">今日</span>`
+                          s.note
+                            ? `<div class="text-subtle" style="font-size:11px;font-weight:400;margin-top:2px;">${escapeHtml(
+                                s.note
+                              )}</div>`
                             : ""
                         }
                       </td>
