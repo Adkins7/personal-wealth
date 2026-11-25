@@ -1,8 +1,10 @@
 import { apiFetch } from "./api.js";
 import { renderNetWorthChart } from "./chart.js";
 import {
+  COMMON_BANKS,
   CREDIT_CATEGORY_LABELS,
   FUND_CATEGORY_LABELS,
+  OTHER_CREDIT_PLATFORMS,
   WOOL_STATUS_LABELS,
   WOOL_TYPE_LABELS,
   centsToInputYuan,
@@ -1461,6 +1463,7 @@ function openQuickCheckinModal() {
 function openFundModal(existing = null) {
   const isEdit = Boolean(existing);
   const cat = existing?.category || "debit_card";
+  const debitOptions = COMMON_BANKS.map((b) => `${b}储蓄卡`);
 
   modalRoot.innerHTML = `
     <div class="modal-backdrop" id="modal-bg">
@@ -1480,11 +1483,27 @@ function openFundModal(existing = null) {
               <option value="other" ${cat === "other" ? "selected" : ""}>其他现金账户</option>
             </select>
           </div>
-          <div class="form-field">
+          <div class="form-field" id="fund-bank-select-wrap">
+            <label class="form-label">选择储蓄卡银行</label>
+            <select class="select" id="fund-bank-select">
+              ${debitOptions
+                .map(
+                  (opt) =>
+                    `<option value="${escapeHtml(opt)}" ${
+                      existing?.name === opt ? "selected" : ""
+                    }>${escapeHtml(opt)}</option>`
+                )
+                .join("")}
+              <option value="__custom__" ${
+                existing?.name && !debitOptions.includes(existing.name) ? "selected" : ""
+              }>其他银行 / 自定义名称…</option>
+            </select>
+          </div>
+          <div class="form-field" id="fund-name-input-wrap">
             <label class="form-label">账户名称</label>
-            <input class="input" name="name" required value="${escapeHtml(
+            <input class="input" id="fund-name-input" value="${escapeHtml(
               existing?.name || ""
-            )}" placeholder="如：华泰证券、招行储蓄卡" />
+            )}" placeholder="如：华泰证券、招行工资卡" />
           </div>
           <div class="form-field">
             <label class="form-label">当前余额（元）</label>
@@ -1499,7 +1518,7 @@ function openFundModal(existing = null) {
             }" placeholder="如 320.50 或 -150" />
           </div>
           <div id="modal-err" class="form-field full"></div>
-          <div class="modal-footer form-field full" style="margin-top:6px;">
+          <div class="modal-footer" style="margin-top:6px;">
             <button type="button" class="btn btn-secondary" id="modal-cancel">取消</button>
             <button type="submit" class="btn btn-primary">保存账户</button>
           </div>
@@ -1510,26 +1529,54 @@ function openFundModal(existing = null) {
 
   bindModalDismiss();
   const catSelect = document.getElementById("fund-cat-select");
+  const bankSelectWrap = document.getElementById("fund-bank-select-wrap");
+  const bankSelect = document.getElementById("fund-bank-select");
+  const nameInputWrap = document.getElementById("fund-name-input-wrap");
+  const nameInput = document.getElementById("fund-name-input");
   const pnlWrap = document.getElementById("fund-pnl-wrap");
-  function syncPnlVisibility() {
+
+  function syncFundFields() {
     const v = catSelect.value;
     pnlWrap.style.display = v === "stock" || v === "fund" ? "flex" : "none";
+    if (v === "debit_card") {
+      bankSelectWrap.style.display = "flex";
+      const isCustom = bankSelect.value === "__custom__";
+      nameInputWrap.style.display = isCustom ? "flex" : "none";
+      nameInputWrap.className = isCustom ? "form-field full" : "form-field";
+    } else {
+      bankSelectWrap.style.display = "none";
+      nameInputWrap.style.display = "flex";
+      nameInputWrap.className = "form-field";
+    }
   }
-  syncPnlVisibility();
-  catSelect.addEventListener("change", syncPnlVisibility);
+  syncFundFields();
+  catSelect.addEventListener("change", syncFundFields);
+  bankSelect.addEventListener("change", syncFundFields);
 
   document.getElementById("fund-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
     const errEl = document.getElementById("modal-err");
     errEl.innerHTML = "";
+
+    const selectedCat = catSelect.value;
+    const finalName =
+      selectedCat === "debit_card" && bankSelect.value !== "__custom__"
+        ? bankSelect.value
+        : nameInput.value.trim();
+
+    if (!finalName) {
+      errEl.innerHTML = `<div class="error-box">请填写账户名称</div>`;
+      return;
+    }
+
     try {
       await apiFetch("/api/fund-accounts", {
         method: isEdit ? "PUT" : "POST",
         body: {
           id: existing?.id,
-          category: fd.get("category"),
-          name: fd.get("name"),
+          category: selectedCat,
+          name: finalName,
           balance_yuan: fd.get("balance_yuan"),
           daily_pnl_yuan: fd.get("daily_pnl_yuan"),
         },
@@ -1566,10 +1613,14 @@ function openCreditModal(existing = null) {
             </select>
           </div>
           <div class="form-field">
-            <label class="form-label">银行或平台名称</label>
-            <input class="input" name="bank_or_platform" required value="${escapeHtml(
+            <label class="form-label" id="credit-bank-label">选择发卡银行</label>
+            <select class="select" id="credit-bank-select"></select>
+          </div>
+          <div class="form-field full" id="credit-custom-bank-wrap" style="display:none;">
+            <label class="form-label">自定义银行或平台名称</label>
+            <input class="input" id="credit-custom-bank-input" value="${escapeHtml(
               existing?.bank_or_platform || ""
-            )}" placeholder="如：招商银行、建设银行" />
+            )}" placeholder="请输入银行或平台名称" />
           </div>
           <div class="form-field full">
             <label class="form-label">卡片备注（请勿填写完整卡号）</label>
@@ -1592,7 +1643,7 @@ function openCreditModal(existing = null) {
             }" placeholder="0.00" />
           </div>
           <div id="modal-err" class="form-field full"></div>
-          <div class="modal-footer form-field full" style="margin-top:6px;">
+          <div class="modal-footer" style="margin-top:6px;">
             <button type="button" class="btn btn-secondary" id="modal-cancel">取消</button>
             <button type="submit" class="btn btn-primary">保存负债账户</button>
           </div>
@@ -1603,25 +1654,85 @@ function openCreditModal(existing = null) {
 
   bindModalDismiss();
   const catSelect = document.getElementById("credit-cat-select");
+  const bankLabel = document.getElementById("credit-bank-label");
+  const bankSelect = document.getElementById("credit-bank-select");
+  const customWrap = document.getElementById("credit-custom-bank-wrap");
+  const customInput = document.getElementById("credit-custom-bank-input");
   const limitWrap = document.getElementById("credit-limit-wrap");
-  function syncLimitVisibility() {
-    limitWrap.style.display = catSelect.value === "credit_card" ? "flex" : "none";
+
+  function populateBankOptions(isInitial = false) {
+    const v = catSelect.value;
+    limitWrap.style.display = v === "credit_card" ? "flex" : "none";
+
+    let presets = [];
+    if (v === "credit_card") {
+      bankLabel.textContent = "选择发卡银行";
+      presets = COMMON_BANKS;
+    } else if (v === "huabei") {
+      bankLabel.textContent = "平台名称";
+      presets = ["花呗"];
+    } else if (v === "baitiao") {
+      bankLabel.textContent = "平台名称";
+      presets = ["京东白条"];
+    } else {
+      bankLabel.textContent = "选择信用平台";
+      presets = OTHER_CREDIT_PLATFORMS;
+    }
+
+    const currentVal = isInitial ? existing?.bank_or_platform || "" : "";
+    const inPresets = !currentVal || presets.includes(currentVal);
+
+    bankSelect.innerHTML =
+      presets
+        .map(
+          (item) =>
+            `<option value="${escapeHtml(item)}" ${
+              currentVal === item ? "selected" : ""
+            }>${escapeHtml(item)}</option>`
+        )
+        .join("") +
+      `<option value="__custom__" ${!inPresets ? "selected" : ""}>${
+        v === "credit_card" ? "其他银行（手动输入）…" : "其他平台（手动输入）…"
+      }</option>`;
+
+    syncCustomInput();
   }
-  syncLimitVisibility();
-  catSelect.addEventListener("change", syncLimitVisibility);
+
+  function syncCustomInput() {
+    const isCustom = bankSelect.value === "__custom__";
+    customWrap.style.display = isCustom ? "flex" : "none";
+    if (isCustom && !customInput.value) {
+      customInput.focus();
+    }
+  }
+
+  populateBankOptions(true);
+  catSelect.addEventListener("change", () => {
+    customInput.value = "";
+    populateBankOptions(false);
+  });
+  bankSelect.addEventListener("change", syncCustomInput);
 
   document.getElementById("credit-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
     const errEl = document.getElementById("modal-err");
     errEl.innerHTML = "";
+
+    const finalBank =
+      bankSelect.value === "__custom__" ? customInput.value.trim() : bankSelect.value;
+    if (!finalBank) {
+      errEl.innerHTML = `<div class="error-box">请选择或填写银行/平台名称</div>`;
+      return;
+    }
+
     try {
       await apiFetch("/api/credit-accounts", {
         method: isEdit ? "PUT" : "POST",
         body: {
           id: existing?.id,
           category: fd.get("category"),
-          bank_or_platform: fd.get("bank_or_platform"),
+          bank_or_platform: finalBank,
           card_alias: fd.get("card_alias"),
           credit_limit_yuan: fd.get("credit_limit_yuan"),
           current_debt_yuan: fd.get("current_debt_yuan"),
