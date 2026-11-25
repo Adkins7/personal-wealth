@@ -1,0 +1,15 @@
+{
+  "name": "personal-wealth",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "清爽、可信、克制的私有个人资产管理与每日净值仪表盘（Node.js 22 + SQLite 零外部依赖）",
+  "scripts": {
+    "start": "node --no-warnings server/index.mjs",
+    "dev": "node --no-warnings --watch server/index.mjs",
+    "test": "node --no-warnings --test tests/wealth.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}
