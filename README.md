@@ -36,3 +36,34 @@ npm test
 # 3. 启动服务（默认监听 http://127.0.0.1:3080）
 npm start
 ```
+
+## 技术栈与架构总结
+
+本项目采用**零第三方依赖的轻量全栈架构**，离线可用、易于维护和备份：
+
+### 1. 后端与运行时
+- **Node.js 22（原生 ESM 模块）**：无需安装 `node_modules`，直接基于 Node 22 内置标准库运行：
+  - `node:http` / `node:fs` / `node:path`：实现 REST API 路由、静态资源托管与防目录穿越校验（`server/index.mjs`、`server/routes.mjs`）。
+  - **纯整数“分”金额引擎**：所有金额与汇总均以人民币“分”整数运算，避免浮点数精度误差（`server/money.mjs`、`server/summary.mjs`）。
+  - 自定义 `.env` 环境变量加载器（`server/env.mjs`）。
+
+### 2. 数据库与持久化
+- **SQLite（Node 22 原生 `node:sqlite` / `DatabaseSync`）**：
+  - 单文件本地存储（`data/wealth.db`），开启 **WAL 模式**、**外键级联删除（`PRAGMA foreign_keys = ON`）**、联合唯一索引及原子事务（`BEGIN / COMMIT / ROLLBACK`）（`server/db.mjs`）。
+  - 支持 **JSON 全量备份** 与 **UTF-8 BOM CSV 导出**（兼容 Excel 中文不乱码）。
+
+### 3. 前端与可视化
+- **原生 HTML5 + 现代 CSS3（CSS Variables / Flexbox / Grid）**：手写设计系统，采用 `tabular-nums` 等宽财务数字排版、毛玻璃顶栏、柔和圆角卡片与克制的绿/红语义色（`public/index.html`、`public/styles.css`）。
+- **原生 ES Modules（Vanilla JS）**：模块化拆分交互视图、表单弹窗、状态管理、API 请求封装及 HTML 转义防 XSS（`public/js/app.js`、`public/js/api.js`、`public/js/format.js`）。
+- **自研交互式 SVG 图表 & 内联 SVG 图标**：不依赖外部图表库或 CDN，离线秒开，支持悬停查看每日净资产、差额与独立盈亏（`public/js/chart.js`、`public/js/icons.js`）。
+- **浏览器 `localStorage`**：用于持久化“一键隐藏金额（防窥屏）”状态。
+
+### 4. 安全与隐私技术（`node:crypto`）
+- **密码存储**：`crypto.scryptSync` 加随机盐哈希 + `crypto.timingSafeEqual` 常量时间比对（`server/auth.mjs`）。
+- **会话与防护**：随机 32 字节会话令牌经 `HMAC-SHA256` 哈希后入库；Cookie 启用 `HttpOnly` + `SameSite=Lax`；所有写接口校验自定义头 `X-Requested-With` 防 CSRF；内置登录失败频率限制与 `ALLOW_REGISTRATION` 注册开关。
+- **数据隔离与脱敏**：全接口强制按 `user_id` 隔离，后端正则拦截 12–19 位完整银行卡号输入。
+
+### 5. 测试、版本控制与部署
+- **自动化测试**：Node 22 原生测试框架 `node:test` + `node:assert` + 内存 SQLite（`:memory:`），端到端验证公式、权限隔离、CSRF 和快照链（`tests/wealth.test.mjs`）。
+- **容器化与托管**：提供基于 `node:22-alpine` 的 `Dockerfile` 及 Git / GitHub 版本管理。
+
