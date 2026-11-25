@@ -2,6 +2,7 @@ import {
   checkLoginRateLimit,
   clearLoginFailures,
   getAuthStatus,
+  getSessionSecret,
   getUserFromRequest,
   hashPassword,
   issueSessionCookie,
@@ -10,7 +11,12 @@ import {
   verifyPassword,
 } from "./auth.mjs";
 import { getDb } from "./db.mjs";
-import { centsToYuanString, getLocalDateString, yuanToCents } from "./money.mjs";
+import {
+  centsToYuanString,
+  getLocalDateString,
+  getNowTimestampString,
+  yuanToCents,
+} from "./money.mjs";
 import {
   computeWoolActualPnl,
   getDashboardPayload,
@@ -36,6 +42,12 @@ function sendJson(res, status, data, extraHeaders = {}) {
 }
 
 async function readJsonBody(req) {
+  if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
+    return req.body;
+  }
+  if (typeof req.body === "string") {
+    return req.body.trim() ? JSON.parse(req.body) : {};
+  }
   const chunks = [];
   let totalLen = 0;
   for await (const chunk of req) {
@@ -72,7 +84,6 @@ export async function handleApiRequest(req, res, urlObj) {
   const { pathname, searchParams } = urlObj;
   const method = req.method || "GET";
 
-  // 针对所有写操作要求自定义请求头，配合 SameSite=Lax 防御跨站请求伪造 (CSRF)
   if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
     const csrfHeader = req.headers["x-requested-with"];
     if (csrfHeader !== "PersonalWealth") {
@@ -81,10 +92,15 @@ export async function handleApiRequest(req, res, urlObj) {
   }
 
   try {
+    // 校验 SESSION_SECRET 环境变量是否已配置
+    getSessionSecret();
+
     // 1. 认证状态查询
     if (pathname === "/api/auth/status" && method === "GET") {
-      const user = getUserFromRequest(req);
-      const status = getAuthStatus();
+      const [user, status] = await Promise.all([
+        getUserFromRequest(req),
+        getAuthStatus(),
+      ]);
       return sendJson(res, 200, {
         authenticated: Boolean(user),
         user,
@@ -94,7 +110,7 @@ export async function handleApiRequest(req, res, urlObj) {
 
     // 2. 注册账号
     if (pathname === "/api/auth/register" && method === "POST") {
-      const { allowRegistration } = getAuthStatus();
+      const { allowRegistration } = await getAuthStatus();
       if (!allowRegistration) {
         return sendJson(res, 403, {
           error: "当前站点已关闭公开注册（ALLOW_REGISTRATION=false）",
@@ -111,22 +127,24 @@ export async function handleApiRequest(req, res, urlObj) {
         return sendJson(res, 400, { error: "密码长度至少需要 8 位" });
       }
 
-      const db = getDb();
-      const existing = db
-        .prepare("SELECT id FROM users WHERE lower(username) = lower(?)")
-        .get(username);
+      const db = await getDb();
+      const existing = await db.get(
+        "SELECT id FROM users WHERE lower(username) = lower(?)",
+        [username]
+      );
       if (existing) {
         return sendJson(res, 409, { error: "该用户名已被使用" });
       }
 
       const passwordHash = hashPassword(password);
-      const result = db
-        .prepare("INSERT INTO users (username, password_hash) VALUES (?, ?)")
-        .run(username, passwordHash);
+      const inserted = await db.get(
+        "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?) RETURNING id",
+        [username, passwordHash, getNowTimestampString()]
+      );
 
-      const userId = Number(result.lastInsertRowid);
-      seedDefaultAccountsForNewUser(userId);
-      const cookie = issueSessionCookie(userId);
+      const userId = Number(inserted.id);
+      await seedDefaultAccountsForNewUser(userId);
+      const cookie = await issueSessionCookie(userId, req);
 
       return sendJson(
         res,
@@ -146,31 +164,31 @@ export async function handleApiRequest(req, res, urlObj) {
         return sendJson(res, 400, { error: "请输入用户名和密码" });
       }
 
-      const forwarded = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "local";
+      const forwarded =
+        req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "local";
       const ip = String(forwarded).split(",")[0].trim();
       const limitKey = `${ip}:${username.toLowerCase()}`;
 
-      const rate = checkLoginRateLimit(limitKey);
+      const rate = await checkLoginRateLimit(limitKey);
       if (!rate.allowed) {
         return sendJson(res, 429, {
           error: `登录尝试过多，请在 ${rate.retryAfterSec} 秒后重试`,
         });
       }
 
-      const db = getDb();
-      const row = db
-        .prepare(
-          "SELECT id, username, password_hash FROM users WHERE lower(username) = lower(?)"
-        )
-        .get(username);
+      const db = await getDb();
+      const row = await db.get(
+        "SELECT id, username, password_hash FROM users WHERE lower(username) = lower(?)",
+        [username]
+      );
 
       if (!row || !verifyPassword(password, row.password_hash)) {
-        recordLoginFailure(limitKey);
+        await recordLoginFailure(limitKey);
         return sendJson(res, 401, { error: "用户名或密码不正确" });
       }
 
-      clearLoginFailures(limitKey);
-      const cookie = issueSessionCookie(Number(row.id));
+      await clearLoginFailures(limitKey);
+      const cookie = await issueSessionCookie(Number(row.id), req);
       return sendJson(
         res,
         200,
@@ -181,12 +199,12 @@ export async function handleApiRequest(req, res, urlObj) {
 
     // 4. 退出登录
     if (pathname === "/api/auth/logout" && method === "POST") {
-      const clearCookie = revokeSessionByRequest(req);
+      const clearCookie = await revokeSessionByRequest(req);
       return sendJson(res, 200, { ok: true }, { "Set-Cookie": clearCookie });
     }
 
     // === 以下所有接口均强制要求已登录，并严格按 user.id 隔离个人数据 ===
-    const user = getUserFromRequest(req);
+    const user = await getUserFromRequest(req);
     if (!user) {
       return sendJson(res, 401, { error: "登录会话已失效，请重新登录" });
     }
@@ -194,24 +212,24 @@ export async function handleApiRequest(req, res, urlObj) {
     // 5. 仪表盘聚合数据
     if (pathname === "/api/dashboard" && method === "GET") {
       const dateParam = searchParams.get("date") || undefined;
-      const payload = getDashboardPayload(user, dateParam);
+      const payload = await getDashboardPayload(user, dateParam);
       return sendJson(res, 200, payload);
     }
 
     // 6. 偏好设置与密码修改
     if (pathname === "/api/settings" && method === "PATCH") {
       const body = await readJsonBody(req);
-      const db = getDb();
+      const db = await getDb();
 
       if (body.stockpile_valuation_mode !== undefined) {
         const mode = body.stockpile_valuation_mode;
         if (mode !== "cost" && mode !== "market") {
           return sendJson(res, 400, { error: "无效的囤货统计口径" });
         }
-        db.prepare("UPDATE users SET stockpile_valuation_mode = ? WHERE id = ?").run(
+        await db.run("UPDATE users SET stockpile_valuation_mode = ? WHERE id = ?", [
           mode,
-          user.id
-        );
+          user.id,
+        ]);
       }
 
       if (body.newPassword !== undefined) {
@@ -220,70 +238,66 @@ export async function handleApiRequest(req, res, urlObj) {
         if (newPassword.length < 8) {
           return sendJson(res, 400, { error: "新密码长度至少需要 8 位" });
         }
-        const row = db
-          .prepare("SELECT password_hash FROM users WHERE id = ?")
-          .get(user.id);
+        const row = await db.get("SELECT password_hash FROM users WHERE id = ?", [
+          user.id,
+        ]);
         if (!row || !verifyPassword(currentPassword, row.password_hash)) {
           return sendJson(res, 400, { error: "当前原密码不正确" });
         }
-        db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
+        await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [
           hashPassword(newPassword),
-          user.id
-        );
+          user.id,
+        ]);
       }
 
       return sendJson(res, 200, { ok: true });
     }
 
-    // 7. 批量快速更新资金与负债（方便每日一键盘点）
+    // 7. 批量快速更新资金与负债（原子事务）
     if (pathname === "/api/quick-balances" && method === "POST") {
       const body = await readJsonBody(req);
       const funds = Array.isArray(body.funds) ? body.funds : [];
       const credits = Array.isArray(body.credits) ? body.credits : [];
       const saveSnapshot = Boolean(body.saveSnapshot);
 
-      const db = getDb();
-      db.exec("BEGIN");
-      try {
-        const updateFund = db.prepare(
-          `UPDATE fund_accounts
-           SET balance_cents = ?, daily_pnl_cents = ?, updated_at = datetime('now', 'localtime')
-           WHERE id = ? AND user_id = ?`
-        );
-        const getFundCat = db.prepare(
-          "SELECT category FROM fund_accounts WHERE id = ? AND user_id = ?"
-        );
+      const db = await getDb();
+      const existingFunds = await db.all(
+        "SELECT id, category FROM fund_accounts WHERE user_id = ?",
+        [user.id]
+      );
+      const fundCatMap = new Map(existingFunds.map((f) => [Number(f.id), f.category]));
+      const now = getNowTimestampString();
+      const statements = [];
 
-        for (const f of funds) {
-          const id = Number(f.id);
-          const existing = getFundCat.get(id, user.id);
-          if (!existing) continue;
-          const bal = yuanToCents(f.balance_yuan, false);
-          const hasPnl = existing.category === "stock" || existing.category === "fund";
-          const pnl = hasPnl ? yuanToCents(f.daily_pnl_yuan, true) : 0;
-          updateFund.run(bal, pnl, id, user.id);
-        }
+      for (const f of funds) {
+        const id = Number(f.id);
+        const category = fundCatMap.get(id);
+        if (!category) continue;
+        const bal = yuanToCents(f.balance_yuan, false);
+        const hasPnl = category === "stock" || category === "fund";
+        const pnl = hasPnl ? yuanToCents(f.daily_pnl_yuan, true) : 0;
+        statements.push({
+          sql: `UPDATE fund_accounts SET balance_cents = ?, daily_pnl_cents = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+          params: [bal, pnl, now, id, user.id],
+        });
+      }
 
-        const updateCredit = db.prepare(
-          `UPDATE credit_accounts
-           SET current_debt_cents = ?, updated_at = datetime('now', 'localtime')
-           WHERE id = ? AND user_id = ?`
-        );
-        for (const c of credits) {
-          const id = Number(c.id);
-          if (!id) continue;
-          const debt = yuanToCents(c.current_debt_yuan, false);
-          updateCredit.run(debt, id, user.id);
-        }
+      for (const c of credits) {
+        const id = Number(c.id);
+        if (!id) continue;
+        const debt = yuanToCents(c.current_debt_yuan, false);
+        statements.push({
+          sql: `UPDATE credit_accounts SET current_debt_cents = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+          params: [debt, now, id, user.id],
+        });
+      }
 
-        db.exec("COMMIT");
-      } catch (err) {
-        db.exec("ROLLBACK");
-        throw err;
+      if (statements.length > 0) {
+        await db.batch(statements);
       }
 
       if (saveSnapshot) {
-        captureSnapshotForDate(user, getLocalDateString(), "");
+        await captureSnapshotForDate(user, getLocalDateString(), "");
       }
 
       return sendJson(res, 200, { ok: true });
@@ -291,7 +305,9 @@ export async function handleApiRequest(req, res, urlObj) {
 
     // 8. 信用付 / 负债账户 CRUD
     if (pathname === "/api/credit-accounts") {
-      const db = getDb();
+      const db = await getDb();
+      const now = getNowTimestampString();
+
       if (method === "POST") {
         const body = await readJsonBody(req);
         const category = body.category;
@@ -312,21 +328,21 @@ export async function handleApiRequest(req, res, urlObj) {
           category === "credit_card" ? yuanToCents(body.credit_limit_yuan, false) : 0;
         const currentDebtCents = yuanToCents(body.current_debt_yuan, false);
 
-        const r = db
-          .prepare(
-            `INSERT INTO credit_accounts
-              (user_id, category, bank_or_platform, card_alias, credit_limit_cents, current_debt_cents)
-             VALUES (?, ?, ?, ?, ?, ?)`
-          )
-          .run(
+        const inserted = await db.get(
+          `INSERT INTO credit_accounts
+            (user_id, category, bank_or_platform, card_alias, credit_limit_cents, current_debt_cents, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+          [
             user.id,
             category,
             bankOrPlatform,
             cardAlias,
             creditLimitCents,
-            currentDebtCents
-          );
-        return sendJson(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
+            currentDebtCents,
+            now,
+          ]
+        );
+        return sendJson(res, 200, { ok: true, id: Number(inserted.id) });
       }
 
       if (method === "PUT") {
@@ -351,23 +367,22 @@ export async function handleApiRequest(req, res, urlObj) {
           category === "credit_card" ? yuanToCents(body.credit_limit_yuan, false) : 0;
         const currentDebtCents = yuanToCents(body.current_debt_yuan, false);
 
-        const r = db
-          .prepare(
-            `UPDATE credit_accounts
-             SET category = ?, bank_or_platform = ?, card_alias = ?, credit_limit_cents = ?, current_debt_cents = ?,
-                 updated_at = datetime('now', 'localtime')
-             WHERE id = ? AND user_id = ?`
-          )
-          .run(
+        const r = await db.run(
+          `UPDATE credit_accounts
+           SET category = ?, bank_or_platform = ?, card_alias = ?, credit_limit_cents = ?, current_debt_cents = ?, updated_at = ?
+           WHERE id = ? AND user_id = ?`,
+          [
             category,
             bankOrPlatform,
             cardAlias,
             creditLimitCents,
             currentDebtCents,
+            now,
             id,
-            user.id
-          );
-        if (Number(r.changes) === 0) {
+            user.id,
+          ]
+        );
+        if (r.changes === 0) {
           return sendJson(res, 404, { error: "账户不存在或无权限操作" });
         }
         return sendJson(res, 200, { ok: true });
@@ -376,10 +391,11 @@ export async function handleApiRequest(req, res, urlObj) {
       if (method === "DELETE") {
         const id = Number(searchParams.get("id"));
         if (!id) return sendJson(res, 400, { error: "缺少账户 ID" });
-        const r = db
-          .prepare("DELETE FROM credit_accounts WHERE id = ? AND user_id = ?")
-          .run(id, user.id);
-        if (Number(r.changes) === 0) {
+        const r = await db.run(
+          "DELETE FROM credit_accounts WHERE id = ? AND user_id = ?",
+          [id, user.id]
+        );
+        if (r.changes === 0) {
           return sendJson(res, 404, { error: "账户不存在或无权限操作" });
         }
         return sendJson(res, 200, { ok: true });
@@ -388,7 +404,9 @@ export async function handleApiRequest(req, res, urlObj) {
 
     // 9. 理财 / 资金账户 CRUD
     if (pathname === "/api/fund-accounts") {
-      const db = getDb();
+      const db = await getDb();
+      const now = getNowTimestampString();
+
       if (method === "POST") {
         const body = await readJsonBody(req);
         const category = body.category;
@@ -406,13 +424,12 @@ export async function handleApiRequest(req, res, urlObj) {
         const hasPnl = category === "stock" || category === "fund";
         const dailyPnlCents = hasPnl ? yuanToCents(body.daily_pnl_yuan, true) : 0;
 
-        const r = db
-          .prepare(
-            `INSERT INTO fund_accounts (user_id, category, name, balance_cents, daily_pnl_cents)
-             VALUES (?, ?, ?, ?, ?)`
-          )
-          .run(user.id, category, name, balanceCents, dailyPnlCents);
-        return sendJson(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
+        const inserted = await db.get(
+          `INSERT INTO fund_accounts (user_id, category, name, balance_cents, daily_pnl_cents, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
+          [user.id, category, name, balanceCents, dailyPnlCents, now]
+        );
+        return sendJson(res, 200, { ok: true, id: Number(inserted.id) });
       }
 
       if (method === "PUT") {
@@ -434,15 +451,13 @@ export async function handleApiRequest(req, res, urlObj) {
         const hasPnl = category === "stock" || category === "fund";
         const dailyPnlCents = hasPnl ? yuanToCents(body.daily_pnl_yuan, true) : 0;
 
-        const r = db
-          .prepare(
-            `UPDATE fund_accounts
-             SET category = ?, name = ?, balance_cents = ?, daily_pnl_cents = ?,
-                 updated_at = datetime('now', 'localtime')
-             WHERE id = ? AND user_id = ?`
-          )
-          .run(category, name, balanceCents, dailyPnlCents, id, user.id);
-        if (Number(r.changes) === 0) {
+        const r = await db.run(
+          `UPDATE fund_accounts
+           SET category = ?, name = ?, balance_cents = ?, daily_pnl_cents = ?, updated_at = ?
+           WHERE id = ? AND user_id = ?`,
+          [category, name, balanceCents, dailyPnlCents, now, id, user.id]
+        );
+        if (r.changes === 0) {
           return sendJson(res, 404, { error: "账户不存在或无权限操作" });
         }
         return sendJson(res, 200, { ok: true });
@@ -451,10 +466,11 @@ export async function handleApiRequest(req, res, urlObj) {
       if (method === "DELETE") {
         const id = Number(searchParams.get("id"));
         if (!id) return sendJson(res, 400, { error: "缺少账户 ID" });
-        const r = db
-          .prepare("DELETE FROM fund_accounts WHERE id = ? AND user_id = ?")
-          .run(id, user.id);
-        if (Number(r.changes) === 0) {
+        const r = await db.run("DELETE FROM fund_accounts WHERE id = ? AND user_id = ?", [
+          id,
+          user.id,
+        ]);
+        if (r.changes === 0) {
           return sendJson(res, 404, { error: "账户不存在或无权限操作" });
         }
         return sendJson(res, 200, { ok: true });
@@ -463,7 +479,9 @@ export async function handleApiRequest(req, res, urlObj) {
 
     // 10. 薅羊毛记录 CRUD
     if (pathname === "/api/wool-records") {
-      const db = getDb();
+      const db = await getDb();
+      const now = getNowTimestampString();
+
       if (method === "POST") {
         const body = await readJsonBody(req);
         const recordDate = String(body.record_date ?? "").trim();
@@ -488,13 +506,11 @@ export async function handleApiRequest(req, res, urlObj) {
         const actualPnlCents = computeWoolActualPnl(status, costCents, actualIncomeCents);
         const note = String(body.note ?? "").trim();
 
-        const r = db
-          .prepare(
-            `INSERT INTO wool_records
-              (user_id, record_date, item_name, type, cost_cents, face_value_cents, actual_income_cents, status, actual_pnl_cents, note)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          )
-          .run(
+        const inserted = await db.get(
+          `INSERT INTO wool_records
+            (user_id, record_date, item_name, type, cost_cents, face_value_cents, actual_income_cents, status, actual_pnl_cents, note, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+          [
             user.id,
             recordDate,
             itemName,
@@ -504,9 +520,11 @@ export async function handleApiRequest(req, res, urlObj) {
             actualIncomeCents,
             status,
             actualPnlCents,
-            note
-          );
-        return sendJson(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
+            note,
+            now,
+          ]
+        );
+        return sendJson(res, 200, { ok: true, id: Number(inserted.id) });
       }
 
       if (method === "PUT") {
@@ -535,14 +553,12 @@ export async function handleApiRequest(req, res, urlObj) {
         const actualPnlCents = computeWoolActualPnl(status, costCents, actualIncomeCents);
         const note = String(body.note ?? "").trim();
 
-        const r = db
-          .prepare(
-            `UPDATE wool_records
-             SET record_date = ?, item_name = ?, type = ?, cost_cents = ?, face_value_cents = ?,
-                 actual_income_cents = ?, status = ?, actual_pnl_cents = ?, note = ?
-             WHERE id = ? AND user_id = ?`
-          )
-          .run(
+        const r = await db.run(
+          `UPDATE wool_records
+           SET record_date = ?, item_name = ?, type = ?, cost_cents = ?, face_value_cents = ?,
+               actual_income_cents = ?, status = ?, actual_pnl_cents = ?, note = ?
+           WHERE id = ? AND user_id = ?`,
+          [
             recordDate,
             itemName,
             type,
@@ -553,9 +569,10 @@ export async function handleApiRequest(req, res, urlObj) {
             actualPnlCents,
             note,
             id,
-            user.id
-          );
-        if (Number(r.changes) === 0) {
+            user.id,
+          ]
+        );
+        if (r.changes === 0) {
           return sendJson(res, 404, { error: "记录不存在或无权限操作" });
         }
         return sendJson(res, 200, { ok: true });
@@ -564,10 +581,11 @@ export async function handleApiRequest(req, res, urlObj) {
       if (method === "DELETE") {
         const id = Number(searchParams.get("id"));
         if (!id) return sendJson(res, 400, { error: "缺少记录 ID" });
-        const r = db
-          .prepare("DELETE FROM wool_records WHERE id = ? AND user_id = ?")
-          .run(id, user.id);
-        if (Number(r.changes) === 0) {
+        const r = await db.run("DELETE FROM wool_records WHERE id = ? AND user_id = ?", [
+          id,
+          user.id,
+        ]);
+        if (r.changes === 0) {
           return sendJson(res, 404, { error: "记录不存在或无权限操作" });
         }
         return sendJson(res, 200, { ok: true });
@@ -576,7 +594,9 @@ export async function handleApiRequest(req, res, urlObj) {
 
     // 11. 囤货管理 CRUD
     if (pathname === "/api/stockpile-items") {
-      const db = getDb();
+      const db = await getDb();
+      const now = getNowTimestampString();
+
       if (method === "POST") {
         const body = await readJsonBody(req);
         const name = String(body.name ?? "").trim();
@@ -593,22 +613,22 @@ export async function handleApiRequest(req, res, urlObj) {
             : yuanToCents(body.current_unit_price_yuan, false);
         const note = String(body.note ?? "").trim();
 
-        const r = db
-          .prepare(
-            `INSERT INTO stockpile_items
-              (user_id, name, quantity, unit, cost_unit_price_cents, current_unit_price_cents, note)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`
-          )
-          .run(
+        const inserted = await db.get(
+          `INSERT INTO stockpile_items
+            (user_id, name, quantity, unit, cost_unit_price_cents, current_unit_price_cents, note, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+          [
             user.id,
             name,
             quantity,
             unit,
             costUnitPriceCents,
             currentUnitPriceCents,
-            note
-          );
-        return sendJson(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
+            note,
+            now,
+          ]
+        );
+        return sendJson(res, 200, { ok: true, id: Number(inserted.id) });
       }
 
       if (method === "PUT") {
@@ -626,24 +646,23 @@ export async function handleApiRequest(req, res, urlObj) {
         const currentUnitPriceCents = yuanToCents(body.current_unit_price_yuan, false);
         const note = String(body.note ?? "").trim();
 
-        const r = db
-          .prepare(
-            `UPDATE stockpile_items
-             SET name = ?, quantity = ?, unit = ?, cost_unit_price_cents = ?, current_unit_price_cents = ?, note = ?,
-                 updated_at = datetime('now', 'localtime')
-             WHERE id = ? AND user_id = ?`
-          )
-          .run(
+        const r = await db.run(
+          `UPDATE stockpile_items
+           SET name = ?, quantity = ?, unit = ?, cost_unit_price_cents = ?, current_unit_price_cents = ?, note = ?, updated_at = ?
+           WHERE id = ? AND user_id = ?`,
+          [
             name,
             quantity,
             unit,
             costUnitPriceCents,
             currentUnitPriceCents,
             note,
+            now,
             id,
-            user.id
-          );
-        if (Number(r.changes) === 0) {
+            user.id,
+          ]
+        );
+        if (r.changes === 0) {
           return sendJson(res, 404, { error: "物品不存在或无权限操作" });
         }
         return sendJson(res, 200, { ok: true });
@@ -652,10 +671,11 @@ export async function handleApiRequest(req, res, urlObj) {
       if (method === "DELETE") {
         const id = Number(searchParams.get("id"));
         if (!id) return sendJson(res, 400, { error: "缺少物品 ID" });
-        const r = db
-          .prepare("DELETE FROM stockpile_items WHERE id = ? AND user_id = ?")
-          .run(id, user.id);
-        if (Number(r.changes) === 0) {
+        const r = await db.run(
+          "DELETE FROM stockpile_items WHERE id = ? AND user_id = ?",
+          [id, user.id]
+        );
+        if (r.changes === 0) {
           return sendJson(res, 404, { error: "物品不存在或无权限操作" });
         }
         return sendJson(res, 200, { ok: true });
@@ -671,21 +691,22 @@ export async function handleApiRequest(req, res, urlObj) {
           return sendJson(res, 400, { error: "无效的快照日期" });
         }
         const note = String(body.note ?? "").trim();
-        captureSnapshotForDate(user, snapshotDate, note);
+        await captureSnapshotForDate(user, snapshotDate, note);
         return sendJson(res, 200, { ok: true });
       }
 
       if (method === "DELETE") {
         const id = Number(searchParams.get("id"));
         if (!id) return sendJson(res, 400, { error: "缺少快照 ID" });
-        const db = getDb();
-        const r = db
-          .prepare("DELETE FROM daily_snapshots WHERE id = ? AND user_id = ?")
-          .run(id, user.id);
-        if (Number(r.changes) === 0) {
+        const db = await getDb();
+        const r = await db.run(
+          "DELETE FROM daily_snapshots WHERE id = ? AND user_id = ?",
+          [id, user.id]
+        );
+        if (r.changes === 0) {
           return sendJson(res, 404, { error: "快照不存在或无权限操作" });
         }
-        recomputeSnapshotChain(user.id);
+        await recomputeSnapshotChain(user.id);
         return sendJson(res, 200, { ok: true });
       }
     }
@@ -693,7 +714,7 @@ export async function handleApiRequest(req, res, urlObj) {
     // 13. 个人数据备份导出（JSON / CSV）
     if (pathname === "/api/export" && method === "GET") {
       const format = searchParams.get("format") || "json";
-      const payload = getDashboardPayload(user);
+      const payload = await getDashboardPayload(user);
       const dateTag = getLocalDateString();
 
       if (format === "csv") {
@@ -869,8 +890,8 @@ export async function handleApiRequest(req, res, urlObj) {
   }
 }
 
-export function captureSnapshotForDate(user, snapshotDate, note) {
-  const payload = getDashboardPayload(user, snapshotDate);
+export async function captureSnapshotForDate(user, snapshotDate, note) {
+  const payload = await getDashboardPayload(user, snapshotDate);
   const { metrics, fundAccounts, creditAccounts } = payload;
   const detailJson = JSON.stringify({
     funds: fundAccounts.map((f) => ({
@@ -887,13 +908,14 @@ export function captureSnapshotForDate(user, snapshotDate, note) {
     })),
   });
 
-  const db = getDb();
-  db.prepare(
+  const db = await getDb();
+  const now = getNowTimestampString();
+  await db.run(
     `INSERT INTO daily_snapshots (
       user_id, snapshot_date, total_funds_cents, total_debt_cents,
       stockpile_cost_cents, stockpile_market_cents, stockpile_value_cents, stockpile_mode_used,
       net_worth_cents, daily_investment_pnl_cents, wool_daily_balance_cents, detail_json, note, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(user_id, snapshot_date) DO UPDATE SET
       total_funds_cents = excluded.total_funds_cents,
       total_debt_cents = excluded.total_debt_cents,
@@ -906,22 +928,24 @@ export function captureSnapshotForDate(user, snapshotDate, note) {
       wool_daily_balance_cents = excluded.wool_daily_balance_cents,
       detail_json = excluded.detail_json,
       note = CASE WHEN excluded.note != '' THEN excluded.note ELSE daily_snapshots.note END,
-      updated_at = datetime('now', 'localtime')`
-  ).run(
-    user.id,
-    snapshotDate,
-    metrics.totalFundsCents,
-    metrics.totalDebtCents,
-    metrics.stockpileCostCents,
-    metrics.stockpileMarketCents,
-    metrics.stockpileActiveValueCents,
-    metrics.valuationMode,
-    metrics.netWorthCents,
-    metrics.dailyInvestmentPnlCents,
-    metrics.woolTodayBalanceCents,
-    detailJson,
-    note
+      updated_at = excluded.updated_at`,
+    [
+      user.id,
+      snapshotDate,
+      metrics.totalFundsCents,
+      metrics.totalDebtCents,
+      metrics.stockpileCostCents,
+      metrics.stockpileMarketCents,
+      metrics.stockpileActiveValueCents,
+      metrics.valuationMode,
+      metrics.netWorthCents,
+      metrics.dailyInvestmentPnlCents,
+      metrics.woolTodayBalanceCents,
+      detailJson,
+      note,
+      now,
+    ]
   );
 
-  recomputeSnapshotChain(user.id);
+  await recomputeSnapshotChain(user.id);
 }

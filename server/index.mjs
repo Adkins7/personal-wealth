@@ -23,9 +23,7 @@ const MIME_TYPES = {
 };
 
 export function createAppServer() {
-  // 启动时验证安全密钥与初始化数据库
   getSessionSecret();
-  getDb();
 
   return http.createServer(async (req, res) => {
     const host = req.headers.host || "localhost";
@@ -35,7 +33,6 @@ export function createAppServer() {
       return handleApiRequest(req, res, urlObj);
     }
 
-    // 静态文件服务（严格限制在 public 目录内，防止目录穿越）
     let relPath = urlObj.pathname === "/" ? "/index.html" : urlObj.pathname;
     try {
       relPath = decodeURIComponent(relPath);
@@ -61,7 +58,7 @@ export function createAppServer() {
 
     res.writeHead(200, {
       "Content-Type": contentType,
-      "Cache-Control": ext === ".html" ? "no-cache" : "no-cache",
+      "Cache-Control": "no-cache",
       "X-Content-Type-Options": "nosniff",
       "X-Frame-Options": "DENY",
     });
@@ -76,6 +73,7 @@ const isMain =
 if (isMain) {
   const port = Number(process.env.PORT || 3080);
   const host = process.env.HOST || "127.0.0.1";
+  await getDb();
   const server = createAppServer();
   server.listen(port, host, () => {
     console.log(`Personal Ledger 已启动: http://${host}:${port}`);

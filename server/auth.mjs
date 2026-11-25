@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { getDb } from "./db.mjs";
+import { getNowTimestampString } from "./money.mjs";
 
 export const SESSION_COOKIE_NAME = "pw_session";
 const SESSION_TTL_SECONDS = 14 * 24 * 60 * 60; // 14 天
@@ -16,7 +17,7 @@ export function getSessionSecret() {
     secret === "replace_with_random_32_byte_hex_secret"
   ) {
     throw new Error(
-      "未配置安全的 SESSION_SECRET 环境变量，请在 .env 文件中设置随机密钥"
+      "未配置安全的 SESSION_SECRET 环境变量：请在 .env 或 Vercel 项目 Settings -> Environment Variables 中设置至少 16 位的随机密钥"
     );
   }
   return secret;
@@ -60,9 +61,9 @@ export function hashSessionToken(rawToken) {
     .digest("hex");
 }
 
-export function getAuthStatus() {
-  const db = getDb();
-  const countRow = db.prepare("SELECT COUNT(*) as cnt FROM users").get();
+export async function getAuthStatus() {
+  const db = await getDb();
+  const countRow = await db.get("SELECT COUNT(*) as cnt FROM users");
   const userCount = Number(countRow?.cnt ?? 0);
   const envVal = String(process.env.ALLOW_REGISTRATION ?? "true")
     .toLowerCase()
@@ -70,24 +71,24 @@ export function getAuthStatus() {
   const envAllows = envVal === "true" || envVal === "1" || envVal === "yes";
   return {
     hasAnyUser: userCount > 0,
-    // 尚无任何账号时允许创建首个管理员/个人账号；已有账号后严格受 ALLOW_REGISTRATION 控制
     allowRegistration: userCount === 0 ? true : envAllows,
   };
 }
 
-export function checkLoginRateLimit(key) {
-  const db = getDb();
+export async function checkLoginRateLimit(key) {
+  const db = await getDb();
   const now = Date.now();
   const windowMs = 15 * 60 * 1000;
   const maxAttempts = 8;
 
-  const row = db
-    .prepare("SELECT attempts, window_start FROM login_attempts WHERE attempt_key = ?")
-    .get(key);
+  const row = await db.get(
+    "SELECT attempts, window_start FROM login_attempts WHERE attempt_key = ?",
+    [key]
+  );
 
   if (!row) return { allowed: true };
   if (now - row.window_start > windowMs) {
-    db.prepare("DELETE FROM login_attempts WHERE attempt_key = ?").run(key);
+    await db.run("DELETE FROM login_attempts WHERE attempt_key = ?", [key]);
     return { allowed: true };
   }
   if (row.attempts >= maxAttempts) {
@@ -97,26 +98,31 @@ export function checkLoginRateLimit(key) {
   return { allowed: true };
 }
 
-export function recordLoginFailure(key) {
-  const db = getDb();
+export async function recordLoginFailure(key) {
+  const db = await getDb();
   const now = Date.now();
-  const row = db
-    .prepare("SELECT attempts, window_start FROM login_attempts WHERE attempt_key = ?")
-    .get(key);
+  const row = await db.get(
+    "SELECT attempts, window_start FROM login_attempts WHERE attempt_key = ?",
+    [key]
+  );
   if (!row || now - row.window_start > 15 * 60 * 1000) {
-    db.prepare(
-      "INSERT OR REPLACE INTO login_attempts (attempt_key, attempts, window_start) VALUES (?, 1, ?)"
-    ).run(key, now);
+    await db.run(
+      `INSERT INTO login_attempts (attempt_key, attempts, window_start)
+       VALUES (?, 1, ?)
+       ON CONFLICT(attempt_key) DO UPDATE SET attempts = 1, window_start = excluded.window_start`,
+      [key, now]
+    );
   } else {
-    db.prepare(
-      "UPDATE login_attempts SET attempts = attempts + 1 WHERE attempt_key = ?"
-    ).run(key);
+    await db.run(
+      "UPDATE login_attempts SET attempts = attempts + 1 WHERE attempt_key = ?",
+      [key]
+    );
   }
 }
 
-export function clearLoginFailures(key) {
-  const db = getDb();
-  db.prepare("DELETE FROM login_attempts WHERE attempt_key = ?").run(key);
+export async function clearLoginFailures(key) {
+  const db = await getDb();
+  await db.run("DELETE FROM login_attempts WHERE attempt_key = ?", [key]);
 }
 
 export function parseCookies(cookieHeader) {
@@ -132,20 +138,25 @@ export function parseCookies(cookieHeader) {
   return out;
 }
 
-export function issueSessionCookie(userId) {
-  const db = getDb();
-  db.prepare("DELETE FROM sessions WHERE expires_at <= ?").run(new Date().toISOString());
+export async function issueSessionCookie(userId, req) {
+  const db = await getDb();
+  await db.run("DELETE FROM sessions WHERE expires_at <= ?", [new Date().toISOString()]);
 
   const rawToken = crypto.randomBytes(32).toString("hex");
   const tokenHash = hashSessionToken(rawToken);
   const expiresAt = new Date(Date.now() + SESSION_TTL_SECONDS * 1000);
 
-  db.prepare(
-    "INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, ?)"
-  ).run(userId, tokenHash, expiresAt.toISOString());
+  await db.run(
+    "INSERT INTO sessions (user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?)",
+    [userId, tokenHash, expiresAt.toISOString(), getNowTimestampString()]
+  );
 
   const isSecure =
-    process.env.NODE_ENV === "production" || process.env.HTTPS === "true";
+    process.env.NODE_ENV === "production" ||
+    Boolean(process.env.VERCEL) ||
+    process.env.HTTPS === "true" ||
+    req?.headers?.["x-forwarded-proto"] === "https";
+
   const parts = [
     `${SESSION_COOKIE_NAME}=${rawToken}`,
     "HttpOnly",
@@ -157,14 +168,14 @@ export function issueSessionCookie(userId) {
   return parts.join("; ");
 }
 
-export function revokeSessionByRequest(req) {
+export async function revokeSessionByRequest(req) {
   const cookies = parseCookies(req.headers.cookie);
   const rawToken = cookies[SESSION_COOKIE_NAME];
   if (rawToken) {
     try {
-      const db = getDb();
+      const db = await getDb();
       const tokenHash = hashSessionToken(rawToken);
-      db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(tokenHash);
+      await db.run("DELETE FROM sessions WHERE token_hash = ?", [tokenHash]);
     } catch {
       // ignore
     }
@@ -172,7 +183,7 @@ export function revokeSessionByRequest(req) {
   return `${SESSION_COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`;
 }
 
-export function getUserFromRequest(req) {
+export async function getUserFromRequest(req) {
   const cookies = parseCookies(req.headers.cookie);
   const rawToken = cookies[SESSION_COOKIE_NAME];
   if (!rawToken) return null;
@@ -184,19 +195,18 @@ export function getUserFromRequest(req) {
     return null;
   }
 
-  const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT u.id, u.username, u.stockpile_valuation_mode, s.expires_at
-       FROM sessions s
-       JOIN users u ON u.id = s.user_id
-       WHERE s.token_hash = ?`
-    )
-    .get(tokenHash);
+  const db = await getDb();
+  const row = await db.get(
+    `SELECT u.id, u.username, u.stockpile_valuation_mode, s.expires_at
+     FROM sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.token_hash = ?`,
+    [tokenHash]
+  );
 
   if (!row) return null;
   if (new Date(row.expires_at).getTime() <= Date.now()) {
-    db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(tokenHash);
+    await db.run("DELETE FROM sessions WHERE token_hash = ?", [tokenHash]);
     return null;
   }
 

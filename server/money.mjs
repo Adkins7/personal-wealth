@@ -1,5 +1,6 @@
 /**
  * 金额与日期工具：全站后端与数据库统一使用人民币“分”（安全整数）存储和计算，彻底消除浮点数精度误差。
+ * 日期与时间戳统一采用北京时间 (Asia/Shanghai)，确保在 Vercel 等海外 UTC 容器上“今日”口径一致。
  */
 
 export function yuanToCents(input, allowNegative = false) {
@@ -45,8 +46,29 @@ export function centsToYuanString(cents) {
 }
 
 export function getLocalDateString(date = new Date()) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const y = parts.find((p) => p.type === "year")?.value;
+  const m = parts.find((p) => p.type === "month")?.value;
+  const d = parts.find((p) => p.type === "day")?.value;
   return `${y}-${m}-${d}`;
+}
+
+export function getNowTimestampString(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const get = (t) => parts.find((p) => p.type === t)?.value || "00";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
 }

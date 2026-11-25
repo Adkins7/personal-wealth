@@ -1,11 +1,11 @@
 # Personal Ledger · 个人资产管理仪表盘
 
-清爽、可信、克制的私有个人财务与每日净资产仪表盘。基于 **Node.js 22 原生模块（`node:http`、`node:sqlite`、`node:crypto`）+ 现代 ES Modules** 构建，**零第三方依赖**，离线可用、秒级启动、单文件 SQLite 易于备份。
+清爽、可信、克制的私有个人财务与每日净资产仪表盘。支持 **本地 SQLite 单机零配置运行** 与 **Vercel + Neon PostgreSQL / Turso 云端永久免费部署**。
 
 ## 核心特性与口径
 1. **登录与个人数据隔离**
-   - 密码使用 `crypto.scrypt` 加随机盐哈希存储，会话令牌经 `HMAC-SHA256` 哈希后存入数据库，Cookie 启用 `HttpOnly` + `SameSite=Lax`。
-   - 支持通过 `.env` 中的 `ALLOW_REGISTRATION=false` 在创建完自己的账号后关闭公开注册。
+   - 密码使用 `crypto.scrypt` 加随机盐哈希存储，会话令牌经 `HMAC-SHA256` 哈希后存入数据库，Cookie 启用 `HttpOnly` + `SameSite=Lax`（HTTPS 下自动启用 `Secure`）。
+   - 支持通过环境变量 `ALLOW_REGISTRATION=false` 在创建完自己的账号后关闭公开注册。
    - 支持一键隐藏全站金额（`¥ ••••••`）及导出全量 JSON / CSV 备份。
 2. **信用付 / 负债**
    - 手动管理多家银行多张信用卡（银行、备注、授权额度、当前总欠款）及花呗、白条。
@@ -24,7 +24,16 @@
    - `较前次变化 = 当日净资产 − 上一条历史快照净资产`
    - 独立展示「当日投资盈亏」与「当日羊毛结余」，避免与净资产变化混淆。
 
-## 快速启动
+## 部署到 Vercel（免费在线方案）
+
+1. 在 Vercel 控制台点击 **Add New... → Project**，导入 GitHub 仓库 `Adkins7/personal-wealth`。
+2. 在导入页面的 **Environment Variables** 添加：
+   - `SESSION_SECRET`：任意 32 位以上随机字符串
+   - `ALLOW_REGISTRATION`：首次注册时填 `true`，注册好个人账号后可改为 `false`
+3. 点击 **Deploy** 完成首次构建后，进入项目顶部的 **Storage** 选项卡 → 点击 **Create Database** → 选择 **Neon (Serverless Postgres)**（或 **Turso**）免费创建并点击 **Connect Project**（Vercel 会自动注入 `DATABASE_URL`）。
+4. 回到 **Deployments** 点最新一条右侧菜单 **Redeploy**，即可上线使用。
+
+## 本地快速启动
 
 ```bash
 # 1. 生成随机安全密钥写入 .env（首次运行）
@@ -33,37 +42,34 @@ node -e "const c=require('crypto'),fs=require('fs');if(!fs.existsSync('.env'))fs
 # 2. 运行自动化验证测试
 npm test
 
-# 3. 启动服务（默认监听 http://127.0.0.1:3080）
+# 3. 启动本地服务（默认监听 http://127.0.0.1:3080）
 npm start
 ```
 
 ## 技术栈与架构总结
 
-本项目采用**零第三方依赖的轻量全栈架构**，离线可用、易于维护和备份：
+本项目采用轻量模块化全栈架构，兼顾本地离线单文件运行与 Serverless 云端部署：
 
 ### 1. 后端与运行时
-- **Node.js 22（原生 ESM 模块）**：无需安装 `node_modules`，直接基于 Node 22 内置标准库运行：
-  - `node:http` / `node:fs` / `node:path`：实现 REST API 路由、静态资源托管与防目录穿越校验（`server/index.mjs`、`server/routes.mjs`）。
-  - **纯整数“分”金额引擎**：所有金额与汇总均以人民币“分”整数运算，避免浮点数精度误差（`server/money.mjs`、`server/summary.mjs`）。
-  - 自定义 `.env` 环境变量加载器（`server/env.mjs`）。
+- **Node.js 22（ESM 模块 + Vercel Serverless Functions）**：
+  - 本地/容器通过 `node:http` 一体化运行（`server/index.mjs`），云端通过 `api/index.js` + `vercel.json` 无缝运行于 Vercel Serverless。
+  - **纯整数“分”金额引擎**：所有金额与汇总均以人民币“分”整数运算，杜绝浮点数误差；日期统一锁定 `Asia/Shanghai` 时区（`server/money.mjs`、`server/summary.mjs`）。
 
-### 2. 数据库与持久化
-- **SQLite（Node 22 原生 `node:sqlite` / `DatabaseSync`）**：
-  - 单文件本地存储（`data/wealth.db`），开启 **WAL 模式**、**外键级联删除（`PRAGMA foreign_keys = ON`）**、联合唯一索引及原子事务（`BEGIN / COMMIT / ROLLBACK`）（`server/db.mjs`）。
-  - 支持 **JSON 全量备份** 与 **UTF-8 BOM CSV 导出**（兼容 Excel 中文不乱码）。
+### 2. 多引擎数据库适配层（`server/db.mjs`）
+- **本地模式**：Node 22 原生 `node:sqlite`（`data/wealth.db`），零外部数据库依赖。
+- **云端模式**：自动识别 `DATABASE_URL` / `POSTGRES_URL` 切换至 `@neondatabase/serverless`（Neon PostgreSQL），或识别 `TURSO_DATABASE_URL` 切换至 `@libsql/client`（Turso 云端 SQLite），首次请求自动建表与索引。
+- 支持 **JSON 全量备份** 与 **UTF-8 BOM CSV 导出**（兼容 Excel 中文不乱码）。
 
 ### 3. 前端与可视化
 - **原生 HTML5 + 现代 CSS3（CSS Variables / Flexbox / Grid）**：手写设计系统，采用 `tabular-nums` 等宽财务数字排版、毛玻璃顶栏、柔和圆角卡片与克制的绿/红语义色（`public/index.html`、`public/styles.css`）。
 - **原生 ES Modules（Vanilla JS）**：模块化拆分交互视图、表单弹窗、状态管理、API 请求封装及 HTML 转义防 XSS（`public/js/app.js`、`public/js/api.js`、`public/js/format.js`）。
-- **自研交互式 SVG 图表 & 内联 SVG 图标**：不依赖外部图表库或 CDN，离线秒开，支持悬停查看每日净资产、差额与独立盈亏（`public/js/chart.js`、`public/js/icons.js`）。
-- **浏览器 `localStorage`**：用于持久化“一键隐藏金额（防窥屏）”状态。
+- **自研交互式 SVG 图表 & 内联 SVG 图标**：无外部 CDN 依赖，支持悬停查看每日净资产、差额与独立盈亏（`public/js/chart.js`、`public/js/icons.js`）。
 
 ### 4. 安全与隐私技术（`node:crypto`）
 - **密码存储**：`crypto.scryptSync` 加随机盐哈希 + `crypto.timingSafeEqual` 常量时间比对（`server/auth.mjs`）。
-- **会话与防护**：随机 32 字节会话令牌经 `HMAC-SHA256` 哈希后入库；Cookie 启用 `HttpOnly` + `SameSite=Lax`；所有写接口校验自定义头 `X-Requested-With` 防 CSRF；内置登录失败频率限制与 `ALLOW_REGISTRATION` 注册开关。
-- **数据隔离与脱敏**：全接口强制按 `user_id` 隔离，后端正则拦截 12–19 位完整银行卡号输入。
+- **会话与防护**：随机 32 字节会话令牌经 `HMAC-SHA256` 哈希后入库；Cookie 启用 `HttpOnly` + `SameSite=Lax` + 生产环境 `Secure`；所有写接口校验 `X-Requested-With` 防 CSRF；内置登录失败限流与注册开关。
+- **数据隔离与脱敏**：全接口强制按 `user_id` 隔离，后端正则拦截 12–19 位完整银行卡号输入，前端支持 `localStorage` 金额防窥脱敏。
 
-### 5. 测试、版本控制与部署
-- **自动化测试**：Node 22 原生测试框架 `node:test` + `node:assert` + 内存 SQLite（`:memory:`），端到端验证公式、权限隔离、CSRF 和快照链（`tests/wealth.test.mjs`）。
-- **容器化与托管**：提供基于 `node:22-alpine` 的 `Dockerfile` 及 Git / GitHub 版本管理。
-
+### 5. 测试与容器化
+- **自动化测试**：Node 22 原生 `node:test` + `node:assert`，覆盖公式核算、权限隔离、CSRF 与 Vercel 路由模拟（`tests/wealth.test.mjs`）。
+- **容器化**：提供基于 `node:22-alpine` 的 `Dockerfile`。
