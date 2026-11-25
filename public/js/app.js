@@ -42,13 +42,26 @@ function showToast(message, isError = false) {
   }, 2800);
 }
 
+let modalDirty = false;
+
 function closeModal() {
+  modalDirty = false;
   modalRoot.innerHTML = "";
+}
+
+function requestCloseModal() {
+  if (
+    modalDirty &&
+    !confirm("当前填写的内容尚未保存，确定放弃修改并关闭弹窗吗？")
+  ) {
+    return;
+  }
+  closeModal();
 }
 
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && modalRoot.innerHTML) {
-    closeModal();
+    requestCloseModal();
   }
 });
 
@@ -2220,6 +2233,7 @@ function openSettingsModal() {
         },
       });
       e.target.reset();
+      modalDirty = false;
       showToast("登录密码已更新");
     } catch (err) {
       msgEl.innerHTML = `<div class="error-box">${escapeHtml(err.message)}</div>`;
@@ -2236,16 +2250,33 @@ function openSettingsModal() {
 }
 
 function bindModalDismiss() {
+  modalDirty = false;
   const bg = document.getElementById("modal-bg");
+  const panel = modalRoot.querySelector(".modal-panel");
   const closeBtn = document.getElementById("modal-close");
   const cancelBtn = document.getElementById("modal-cancel");
-  if (bg) {
-    bg.addEventListener("click", (e) => {
-      if (e.target === bg) closeModal();
+
+  if (panel) {
+    const markDirty = () => {
+      modalDirty = true;
+    };
+    panel.addEventListener("input", markDirty);
+    panel.addEventListener("change", markDirty);
+  }
+
+  // 点击遮罩空白处不关闭弹窗，避免误触或拖选数字松手在框外导致录入数据丢失
+  if (bg && panel) {
+    bg.addEventListener("mousedown", (e) => {
+      if (e.target === bg) {
+        panel.classList.remove("nudge");
+        void panel.offsetWidth;
+        panel.classList.add("nudge");
+        setTimeout(() => panel.classList.remove("nudge"), 170);
+      }
     });
   }
-  if (closeBtn) closeBtn.addEventListener("click", closeModal);
-  if (cancelBtn) cancelBtn.addEventListener("click", closeModal);
+  if (closeBtn) closeBtn.addEventListener("click", requestCloseModal);
+  if (cancelBtn) cancelBtn.addEventListener("click", requestCloseModal);
 }
 
 bootstrap();

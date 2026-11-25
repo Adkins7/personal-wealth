@@ -755,6 +755,11 @@ body {
   border: 1px solid var(--border);
   box-shadow: var(--shadow-modal);
   padding: 26px 28px;
+  transition: transform 0.16s ease;
+}
+
+.modal-panel.nudge {
+  transform: scale(1.014);
 }
 
 .modal-panel.wide {
