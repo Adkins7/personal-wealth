@@ -153,6 +153,13 @@ export function renderNetWorthChart(container, snapshots, masked) {
         <span>投资盈亏(独立): <strong class="${pnlClass(
           s.daily_investment_pnl_cents
         )}">${formatMoney(s.daily_investment_pnl_cents, { masked, showSign: true })}</strong></span>
+        <span>当日消费(独立): <strong class="${
+          Number(s.daily_expense_cents || 0) > 0 ? "text-loss" : ""
+        }">${
+          Number(s.daily_expense_cents || 0) > 0
+            ? "-" + formatMoney(s.daily_expense_cents, { masked })
+            : formatMoney(0, { masked })
+        }</strong></span>
         <span>羊毛结余(独立): <strong class="${pnlClass(
           s.wool_daily_balance_cents
         )}">${formatMoney(s.wool_daily_balance_cents, { masked, showSign: true })}</strong></span>

@@ -18,6 +18,7 @@ const NUMERIC_COLS = new Set([
   "window_start",
   "sort_order",
   "quantity",
+  "is_large",
 ]);
 
 export function normalizeRow(row) {
@@ -46,6 +47,7 @@ const SQLITE_DDL = [
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     stockpile_valuation_mode TEXT NOT NULL DEFAULT 'cost' CHECK(stockpile_valuation_mode IN ('cost', 'market')),
+    monthly_budget_cents INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS sessions (
@@ -128,12 +130,24 @@ const SQLITE_DDL = [
     prev_snapshot_date TEXT,
     daily_investment_pnl_cents INTEGER NOT NULL,
     wool_daily_balance_cents INTEGER NOT NULL,
+    daily_expense_cents INTEGER NOT NULL DEFAULT 0,
     detail_json TEXT NOT NULL DEFAULT '{}',
     note TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
     UNIQUE(user_id, snapshot_date)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_daily_snapshots_user_date ON daily_snapshots(user_id, snapshot_date ASC)`,
+  `CREATE TABLE IF NOT EXISTS daily_expenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expense_date TEXT NOT NULL,
+    category TEXT NOT NULL CHECK(category IN ('dining', 'shopping', 'transport', 'housing', 'entertainment', 'medical', 'social', 'other')),
+    amount_cents INTEGER NOT NULL DEFAULT 0,
+    is_large INTEGER NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_daily_expenses_user_date ON daily_expenses(user_id, expense_date DESC)`,
 ];
 
 const POSTGRES_DDL = [
@@ -142,8 +156,13 @@ const POSTGRES_DDL = [
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     stockpile_valuation_mode TEXT NOT NULL DEFAULT 'cost' CHECK(stockpile_valuation_mode IN ('cost', 'market')),
+    monthly_budget_cents BIGINT NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
   )`,
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS monthly_budget_cents BIGINT`,
+  `UPDATE users SET monthly_budget_cents = 0 WHERE monthly_budget_cents IS NULL`,
+  `ALTER TABLE users ALTER COLUMN monthly_budget_cents SET DEFAULT 0`,
+  `ALTER TABLE users ALTER COLUMN monthly_budget_cents SET NOT NULL`,
   `CREATE TABLE IF NOT EXISTS sessions (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -228,12 +247,28 @@ const POSTGRES_DDL = [
     prev_snapshot_date TEXT,
     daily_investment_pnl_cents BIGINT NOT NULL,
     wool_daily_balance_cents BIGINT NOT NULL,
+    daily_expense_cents BIGINT NOT NULL DEFAULT 0,
     detail_json TEXT NOT NULL DEFAULT '{}',
     note TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
     UNIQUE(user_id, snapshot_date)
   )`,
+  `ALTER TABLE daily_snapshots ADD COLUMN IF NOT EXISTS daily_expense_cents BIGINT`,
+  `UPDATE daily_snapshots SET daily_expense_cents = 0 WHERE daily_expense_cents IS NULL`,
+  `ALTER TABLE daily_snapshots ALTER COLUMN daily_expense_cents SET DEFAULT 0`,
+  `ALTER TABLE daily_snapshots ALTER COLUMN daily_expense_cents SET NOT NULL`,
   `CREATE INDEX IF NOT EXISTS idx_daily_snapshots_user_date ON daily_snapshots(user_id, snapshot_date ASC)`,
+  `CREATE TABLE IF NOT EXISTS daily_expenses (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expense_date TEXT NOT NULL,
+    category TEXT NOT NULL CHECK(category IN ('dining', 'shopping', 'transport', 'housing', 'entertainment', 'medical', 'social', 'other')),
+    amount_cents BIGINT NOT NULL DEFAULT 0,
+    is_large INTEGER NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_daily_expenses_user_date ON daily_expenses(user_id, expense_date DESC)`,
 ];
 
 function createLocalSqliteAdapter(rawDb) {
@@ -246,6 +281,16 @@ function createLocalSqliteAdapter(rawDb) {
     rawDb.exec("ALTER TABLE credit_accounts ADD COLUMN remaining_limit_cents INTEGER;");
     rawDb.exec(
       "UPDATE credit_accounts SET remaining_limit_cents = CASE WHEN category = 'credit_card' THEN MAX(0, credit_limit_cents - current_debt_cents) ELSE 0 END WHERE remaining_limit_cents IS NULL;"
+    );
+  }
+  const userCols = rawDb.prepare("PRAGMA table_info(users)").all();
+  if (!userCols.some((c) => c.name === "monthly_budget_cents")) {
+    rawDb.exec("ALTER TABLE users ADD COLUMN monthly_budget_cents INTEGER NOT NULL DEFAULT 0;");
+  }
+  const snapCols = rawDb.prepare("PRAGMA table_info(daily_snapshots)").all();
+  if (!snapCols.some((c) => c.name === "daily_expense_cents")) {
+    rawDb.exec(
+      "ALTER TABLE daily_snapshots ADD COLUMN daily_expense_cents INTEGER NOT NULL DEFAULT 0;"
     );
   }
   return {
@@ -291,18 +336,35 @@ async function createTursoAdapter(url, authToken) {
     ["PRAGMA foreign_keys = ON", ...SQLITE_DDL].map((sql) => ({ sql, args: [] })),
     "write"
   );
-  const info = await client.execute("PRAGMA table_info(credit_accounts)");
+  const [info, userInfo, snapInfo] = await Promise.all([
+    client.execute("PRAGMA table_info(credit_accounts)"),
+    client.execute("PRAGMA table_info(users)"),
+    client.execute("PRAGMA table_info(daily_snapshots)"),
+  ]);
+  const migs = [];
   if (!info.rows.some((r) => r.name === "remaining_limit_cents")) {
-    await client.batch(
-      [
-        { sql: "ALTER TABLE credit_accounts ADD COLUMN remaining_limit_cents INTEGER", args: [] },
-        {
-          sql: "UPDATE credit_accounts SET remaining_limit_cents = CASE WHEN category = 'credit_card' THEN MAX(0, credit_limit_cents - current_debt_cents) ELSE 0 END WHERE remaining_limit_cents IS NULL",
-          args: [],
-        },
-      ],
-      "write"
+    migs.push(
+      { sql: "ALTER TABLE credit_accounts ADD COLUMN remaining_limit_cents INTEGER", args: [] },
+      {
+        sql: "UPDATE credit_accounts SET remaining_limit_cents = CASE WHEN category = 'credit_card' THEN MAX(0, credit_limit_cents - current_debt_cents) ELSE 0 END WHERE remaining_limit_cents IS NULL",
+        args: [],
+      }
     );
+  }
+  if (!userInfo.rows.some((r) => r.name === "monthly_budget_cents")) {
+    migs.push({
+      sql: "ALTER TABLE users ADD COLUMN monthly_budget_cents INTEGER NOT NULL DEFAULT 0",
+      args: [],
+    });
+  }
+  if (!snapInfo.rows.some((r) => r.name === "daily_expense_cents")) {
+    migs.push({
+      sql: "ALTER TABLE daily_snapshots ADD COLUMN daily_expense_cents INTEGER NOT NULL DEFAULT 0",
+      args: [],
+    });
+  }
+  if (migs.length > 0) {
+    await client.batch(migs, "write");
   }
   return {
     dialect: "turso",

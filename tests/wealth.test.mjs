@@ -217,6 +217,41 @@ test("端到端核验：安全认证、权限隔离、防敏感卡号、资产�
     },
   });
 
+  // 录入每日消费：日常餐饮 45.50 + 日常交通 14.50 + 大额房租 3000.00（标记 is_large=true）
+  await alice.request("/api/settings", {
+    method: "PATCH",
+    body: { monthly_budget_yuan: "5000" },
+  });
+  const exp1 = await alice.request("/api/expenses", {
+    method: "POST",
+    body: {
+      expense_date: "2026-11-26",
+      category: "dining",
+      amount_yuan: "45.50",
+      note: "午餐",
+    },
+  });
+  assert.equal(exp1.status, 200);
+  await alice.request("/api/expenses", {
+    method: "POST",
+    body: {
+      expense_date: "2026-11-26",
+      category: "transport",
+      amount_yuan: "14.50",
+      note: "打车",
+    },
+  });
+  await alice.request("/api/expenses", {
+    method: "POST",
+    body: {
+      expense_date: "2026-11-26",
+      category: "housing",
+      amount_yuan: "3000",
+      is_large: true,
+      note: "月度房租",
+    },
+  });
+
   const dashCost = (await alice.request("/api/dashboard?date=2026-11-26")).data;
   assert.equal(dashCost.metrics.totalFundsCents, 20000000);
   assert.equal(dashCost.metrics.totalDebtCents, 600000);
@@ -224,8 +259,13 @@ test("端到端核验：安全认证、权限隔离、防敏感卡号、资产�
   assert.equal(dashCost.metrics.dailyInvestmentPnlCents, 90000);
   assert.equal(dashCost.metrics.woolTodayBalanceCents, 3880);
   assert.equal(dashCost.metrics.woolPendingFaceValueCents, 5000);
+  assert.equal(dashCost.metrics.expenseTodayCents, 306000);
+  assert.equal(dashCost.metrics.expenseMonthTotalCents, 306000);
+  assert.equal(dashCost.metrics.expenseMonthRegularCents, 6000);
+  assert.equal(dashCost.metrics.monthlyBudgetCents, 500000);
   assert.equal(dashCost.metrics.stockpileCostCents, 100000);
   assert.equal(dashCost.metrics.stockpileMarketCents, 120000);
+  // 净资产绝不二次扣减每日消费流水
   assert.equal(dashCost.metrics.netWorthCents, 19500000);
 
   await alice.request("/api/snapshots", {
@@ -254,6 +294,7 @@ test("端到端核验：安全认证、权限隔离、防敏感卡号、资产�
   assert.equal(snap26.net_worth_change_cents, 20000);
   assert.equal(snap26.prev_snapshot_date, "2026-11-25");
   assert.equal(snap26.stockpile_mode_used, "market");
+  assert.equal(snap26.daily_expense_cents, 306000);
 
   const regBob = await bob.request("/api/auth/register", {
     method: "POST",

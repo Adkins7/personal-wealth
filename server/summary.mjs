@@ -90,58 +90,70 @@ export async function getDashboardPayload(user, targetDate) {
 
   const freshUser =
     (await db.get(
-      "SELECT id, username, stockpile_valuation_mode FROM users WHERE id = ?",
+      "SELECT id, username, stockpile_valuation_mode, monthly_budget_cents FROM users WHERE id = ?",
       [user.id]
     )) || user;
 
-  const [creditAccounts, fundAccounts, woolRecords, stockpileItems, snapshots] =
-    await Promise.all([
-      db.all(
-        `SELECT * FROM credit_accounts
-         WHERE user_id = ?
-         ORDER BY
-           CASE category
-             WHEN 'credit_card' THEN 1
-             WHEN 'huabei' THEN 2
-             WHEN 'baitiao' THEN 3
-             ELSE 4
-           END,
-           sort_order ASC, id ASC`,
-        [user.id]
-      ),
-      db.all(
-        `SELECT * FROM fund_accounts
-         WHERE user_id = ?
-         ORDER BY
-           CASE category
-             WHEN 'stock' THEN 1
-             WHEN 'fund' THEN 2
-             WHEN 'debit_card' THEN 3
-             WHEN 'wechat_pay' THEN 4
-             ELSE 5
-           END,
-           sort_order ASC, id ASC`,
-        [user.id]
-      ),
-      db.all(
-        `SELECT * FROM wool_records
-         WHERE user_id = ?
-         ORDER BY record_date DESC, id DESC`,
-        [user.id]
-      ),
-      db.all(
-        `SELECT * FROM stockpile_items
-         WHERE user_id = ?
-         ORDER BY id DESC`,
-        [user.id]
-      ),
-      db.all(
-        `SELECT * FROM daily_snapshots
-         WHERE user_id = ?
-         ORDER BY snapshot_date ASC`,
-        [user.id]
-      ),
-    ]);
+  const [
+    creditAccounts,
+    fundAccounts,
+    woolRecords,
+    stockpileItems,
+    expenseRecords,
+    snapshots,
+  ] = await Promise.all([
+    db.all(
+      `SELECT * FROM credit_accounts
+       WHERE user_id = ?
+       ORDER BY
+         CASE category
+           WHEN 'credit_card' THEN 1
+           WHEN 'huabei' THEN 2
+           WHEN 'baitiao' THEN 3
+           ELSE 4
+         END,
+         sort_order ASC, id ASC`,
+      [user.id]
+    ),
+    db.all(
+      `SELECT * FROM fund_accounts
+       WHERE user_id = ?
+       ORDER BY
+         CASE category
+           WHEN 'stock' THEN 1
+           WHEN 'fund' THEN 2
+           WHEN 'debit_card' THEN 3
+           WHEN 'wechat_pay' THEN 4
+           ELSE 5
+         END,
+         sort_order ASC, id ASC`,
+      [user.id]
+    ),
+    db.all(
+      `SELECT * FROM wool_records
+       WHERE user_id = ?
+       ORDER BY record_date DESC, id DESC`,
+      [user.id]
+    ),
+    db.all(
+      `SELECT * FROM stockpile_items
+       WHERE user_id = ?
+       ORDER BY id DESC`,
+      [user.id]
+    ),
+    db.all(
+      `SELECT * FROM daily_expenses
+       WHERE user_id = ?
+       ORDER BY expense_date DESC, id DESC`,
+      [user.id]
+    ),
+    db.all(
+      `SELECT * FROM daily_snapshots
+       WHERE user_id = ?
+       ORDER BY snapshot_date ASC`,
+      [user.id]
+    ),
+  ]);
 
   let totalDebtCents = 0;
   let totalCreditLimitCents = 0;
@@ -213,6 +225,29 @@ export async function getDashboardPayload(user, targetDate) {
 
   const netWorthCents = totalFundsCents - totalDebtCents + stockpileActiveValueCents;
 
+  // 每日消费（独立流量指标，不二次扣减净资产）
+  const currentMonth = today.slice(0, 7);
+  let expenseTodayCents = 0;
+  let expenseMonthTotalCents = 0;
+  let expenseMonthRegularCents = 0;
+
+  for (const exp of expenseRecords) {
+    const amt = Number(exp.amount_cents);
+    if (exp.expense_date === today) {
+      expenseTodayCents += amt;
+    }
+    if (exp.expense_date.startsWith(currentMonth)) {
+      expenseMonthTotalCents += amt;
+      if (!Number(exp.is_large)) {
+        expenseMonthRegularCents += amt;
+      }
+    }
+  }
+
+  const daysElapsed = Math.max(1, Number(today.slice(8, 10)) || 1);
+  const expenseMonthDailyAvgCents = Math.round(expenseMonthRegularCents / daysElapsed);
+  const monthlyBudgetCents = Number(freshUser.monthly_budget_cents ?? 0);
+
   let prevSnapshot = null;
   let todaySnapshot = null;
   for (const snap of snapshots) {
@@ -233,12 +268,14 @@ export async function getDashboardPayload(user, targetDate) {
       id: Number(freshUser.id),
       username: freshUser.username,
       stockpile_valuation_mode: valuationMode,
+      monthly_budget_cents: monthlyBudgetCents,
     },
     today,
     creditAccounts,
     fundAccounts,
     woolRecords,
     stockpileItems,
+    expenseRecords,
     snapshots,
     metrics: {
       totalFundsCents,
@@ -265,6 +302,11 @@ export async function getDashboardPayload(user, targetDate) {
       woolTotalRealizedPnlCents,
       woolPendingFaceValueCents,
       woolPendingCostCents,
+      expenseTodayCents,
+      expenseMonthTotalCents,
+      expenseMonthRegularCents,
+      expenseMonthDailyAvgCents,
+      monthlyBudgetCents,
     },
   };
 }

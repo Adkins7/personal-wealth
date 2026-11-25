@@ -85,6 +85,17 @@ export const WOOL_STATUS_LABELS = {
   expired: "已过期 / 作废",
 };
 
+export const EXPENSE_CATEGORY_LABELS = {
+  dining: "餐饮美食",
+  shopping: "日常购物",
+  transport: "交通出行",
+  housing: "居家水电",
+  entertainment: "休闲娱乐",
+  medical: "医疗健康",
+  social: "人情往来",
+  other: "其他支出",
+};
+
 export const COMMON_BANKS = [
   "招商银行",
   "工商银行",

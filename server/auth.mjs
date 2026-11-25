@@ -197,7 +197,7 @@ export async function getUserFromRequest(req) {
 
   const db = await getDb();
   const row = await db.get(
-    `SELECT u.id, u.username, u.stockpile_valuation_mode, s.expires_at
+    `SELECT u.id, u.username, u.stockpile_valuation_mode, u.monthly_budget_cents, s.expires_at
      FROM sessions s
      JOIN users u ON u.id = s.user_id
      WHERE s.token_hash = ?`,
@@ -214,5 +214,6 @@ export async function getUserFromRequest(req) {
     id: Number(row.id),
     username: row.username,
     stockpile_valuation_mode: row.stockpile_valuation_mode,
+    monthly_budget_cents: Number(row.monthly_budget_cents ?? 0),
   };
 }

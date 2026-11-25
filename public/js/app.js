@@ -3,6 +3,7 @@ import { renderNetWorthChart } from "./chart.js";
 import {
   COMMON_BANKS,
   CREDIT_CATEGORY_LABELS,
+  EXPENSE_CATEGORY_LABELS,
   FUND_CATEGORY_LABELS,
   OTHER_CREDIT_PLATFORMS,
   WOOL_STATUS_LABELS,
@@ -22,9 +23,11 @@ const state = {
   allowRegistration: true,
   hasAnyUser: false,
   authMode: "login",
-  activeTab: "overview", // overview | accounts | wool | stockpile
+  activeTab: "overview", // overview | accounts | expenses | wool | stockpile
   masked: localStorage.getItem("pw_masked") === "1",
   woolFilterDate: "", // 空字符串表示查看全部日期，否则按 YYYY-MM-DD 过滤并展示当天结余
+  expenseFilterMonth: "", // YYYY-MM，空字符串默认当前月
+  expenseFilterDate: "", // YYYY-MM-DD，空字符串表示查看所选月份全部
   dashboard: null,
 };
 
@@ -285,6 +288,9 @@ function renderMainApp() {
             state.activeTab === "accounts" ? "active" : ""
           }" data-tab="accounts">资金与负债</button>
           <button type="button" class="segmented-btn ${
+            state.activeTab === "expenses" ? "active" : ""
+          }" data-tab="expenses">每日消费</button>
+          <button type="button" class="segmented-btn ${
             state.activeTab === "wool" ? "active" : ""
           }" data-tab="wool">薅羊毛</button>
           <button type="button" class="segmented-btn ${
@@ -355,6 +361,8 @@ function renderMainApp() {
     renderOverviewTab(tabContainer);
   } else if (state.activeTab === "accounts") {
     renderAccountsTab(tabContainer);
+  } else if (state.activeTab === "expenses") {
+    renderExpensesTab(tabContainer);
   } else if (state.activeTab === "wool") {
     renderWoolTab(tabContainer);
   } else if (state.activeTab === "stockpile") {
@@ -489,7 +497,7 @@ function renderOverviewTab(container) {
     <div class="flow-section-label">
       <span>今日独立流量指标 · 单独展示，不与净资产变化混同、不重复累加</span>
     </div>
-    <section class="grid-2">
+    <section class="grid-3">
       <div class="card card-compact">
         <div style="display:flex;align-items:center;justify-content:space-between;">
           <span class="text-muted" style="font-size:12.5px;font-weight:500;">当日投资盈亏（股票 + 基金）</span>
@@ -499,13 +507,13 @@ function renderOverviewTab(container) {
           ${formatMoney(metrics.dailyInvestmentPnlCents, { masked, showSign: true })}
         </div>
         <div class="metric-foot num">
-          <span>股票当日：<strong class="${pnlClass(
+          <span>股票：<strong class="${pnlClass(
             metrics.stockDailyPnlCents
           )}">${formatMoney(metrics.stockDailyPnlCents, {
     masked,
     showSign: true,
   })}</strong></span>
-          <span>基金当日：<strong class="${pnlClass(
+          <span>基金：<strong class="${pnlClass(
             metrics.fundDailyPnlCents
           )}">${formatMoney(metrics.fundDailyPnlCents, {
     masked,
@@ -516,22 +524,44 @@ function renderOverviewTab(container) {
 
       <div class="card card-compact">
         <div style="display:flex;align-items:center;justify-content:space-between;">
-          <span class="text-muted" style="font-size:12.5px;font-weight:500;">羊毛当日结余（已售出/已兑现盈亏）</span>
+          <span class="text-muted" style="font-size:12.5px;font-weight:500;">今日消费支出</span>
+          <button type="button" class="btn-ghost btn-sm" data-goto="expenses" style="padding:2px 6px;font-size:11.5px;">记一笔 →</button>
+        </div>
+        <div class="metric-big num ${metrics.expenseTodayCents > 0 ? "text-loss" : ""}">
+          ${
+            metrics.expenseTodayCents > 0
+              ? "-" + formatMoney(metrics.expenseTodayCents, { masked })
+              : formatMoney(0, { masked })
+          }
+        </div>
+        <div class="metric-foot num">
+          <span>本月已花：<strong>${formatMoney(metrics.expenseMonthTotalCents, {
+            masked,
+          })}</strong></span>
+          <span>日常日均：<strong>${formatMoney(metrics.expenseMonthDailyAvgCents, {
+            masked,
+          })}</strong></span>
+        </div>
+      </div>
+
+      <div class="card card-compact">
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <span class="text-muted" style="font-size:12.5px;font-weight:500;">羊毛当日结余（已兑现盈亏）</span>
           <span class="pill pill-neutral">不计入净资产</span>
         </div>
         <div class="metric-big num ${pnlClass(metrics.woolTodayBalanceCents)}">
           ${formatMoney(metrics.woolTodayBalanceCents, { masked, showSign: true })}
         </div>
         <div class="metric-foot num">
-          <span>累计已落袋：<strong class="${pnlClass(
+          <span>累计落袋：<strong class="${pnlClass(
             metrics.woolTotalRealizedPnlCents
           )}">${formatMoney(metrics.woolTotalRealizedPnlCents, {
     masked,
     showSign: true,
   })}</strong></span>
-          <span>未兑现面值：<strong>${formatMoney(metrics.woolPendingFaceValueCents, {
+          <span>待用面值：<strong>${formatMoney(metrics.woolPendingFaceValueCents, {
             masked,
-          })}</strong>（不当现金）</span>
+          })}</strong></span>
         </div>
       </div>
     </section>
@@ -572,6 +602,7 @@ function renderOverviewTab(container) {
                     <th class="right">负债总额</th>
                     <th class="right">囤货总额(口径)</th>
                     <th class="right">当日投资盈亏</th>
+                    <th class="right">当日消费</th>
                     <th class="right">当日羊毛结余</th>
                     <th class="right">操作</th>
                   </tr>
@@ -620,6 +651,15 @@ function renderOverviewTab(container) {
                       </td>
                       <td class="right num ${pnlClass(s.daily_investment_pnl_cents)}">
                         ${formatMoney(s.daily_investment_pnl_cents, { masked, showSign: true })}
+                      </td>
+                      <td class="right num ${
+                        Number(s.daily_expense_cents || 0) > 0 ? "text-loss" : ""
+                      }">
+                        ${
+                          Number(s.daily_expense_cents || 0) > 0
+                            ? "-" + formatMoney(s.daily_expense_cents, { masked })
+                            : formatMoney(0, { masked })
+                        }
                       </td>
                       <td class="right num ${pnlClass(s.wool_daily_balance_cents)}">
                         ${formatMoney(s.wool_daily_balance_cents, { masked, showSign: true })}
@@ -1387,6 +1427,356 @@ function renderStockpileTab(container) {
   });
 }
 
+/* ========================= 4.5 每日消费记录与预算视图 ========================= */
+function renderExpensesTab(container) {
+  const { expenseRecords = [], metrics, today } = state.dashboard;
+  const masked = state.masked;
+  const activeMonth = state.expenseFilterMonth || today.slice(0, 7);
+  const filterDate = state.expenseFilterDate;
+
+  const monthRecords = expenseRecords.filter((r) =>
+    r.expense_date.startsWith(activeMonth)
+  );
+  const displayedRecords = filterDate
+    ? expenseRecords.filter((r) => r.expense_date === filterDate)
+    : monthRecords;
+
+  const targetDay = filterDate || today;
+  let targetDayTotalCents = 0;
+  let targetDayCount = 0;
+  for (const r of expenseRecords) {
+    if (r.expense_date === targetDay) {
+      targetDayTotalCents += Number(r.amount_cents);
+      targetDayCount++;
+    }
+  }
+
+  let selectedMonthTotalCents = 0;
+  let selectedMonthRegularCents = 0;
+  const catSums = {};
+  for (const r of monthRecords) {
+    const amt = Number(r.amount_cents);
+    selectedMonthTotalCents += amt;
+    if (!Number(r.is_large)) {
+      selectedMonthRegularCents += amt;
+    }
+    catSums[r.category] = (catSums[r.category] || 0) + amt;
+  }
+
+  // 计算所选月份经过天数（若为当前月按今日号数，若为历史月按当月总天数）
+  let divisorDays = 30;
+  if (activeMonth === today.slice(0, 7)) {
+    divisorDays = Math.max(1, Number(today.slice(8, 10)) || 1);
+  } else {
+    const [yy, mm] = activeMonth.split("-").map(Number);
+    if (yy && mm) {
+      divisorDays = new Date(yy, mm, 0).getDate();
+    }
+  }
+  const selectedMonthAvgCents = Math.round(selectedMonthRegularCents / divisorDays);
+
+  const budgetCents = Number(metrics.monthlyBudgetCents || 0);
+  const budgetUsedPct =
+    budgetCents > 0
+      ? Math.min(100, Math.round((selectedMonthTotalCents / budgetCents) * 100))
+      : 0;
+  const budgetRemainingCents = budgetCents - selectedMonthTotalCents;
+
+  const sortedCats = Object.entries(catSums).sort((a, b) => b[1] - a[1]);
+  const barShades = [
+    "#0f172a",
+    "#334155",
+    "#475569",
+    "#64748b",
+    "#94a3b8",
+    "#cbd5e1",
+    "#e2e8f0",
+    "#f1f5f9",
+  ];
+
+  const recentMonthDates = [...new Set(monthRecords.map((r) => r.expense_date))].slice(
+    0,
+    6
+  );
+
+  container.innerHTML = `
+    <div class="notice-banner">
+      <span>口径说明：消费流水用于追踪日常花销去向与预算进度，由于支出已反映在微信/储蓄卡余额或信用卡剩余额度中，此处<strong>不二次扣减净资产</strong>。</span>
+      <button type="button" class="btn btn-secondary btn-sm" id="btn-set-budget">
+        ${icons.sliders} ${
+    budgetCents > 0
+      ? `月度预算：${formatMoney(budgetCents, { masked })}`
+      : "设置月度预算"
+  }
+      </button>
+    </div>
+
+    <section class="grid-3">
+      <div class="card card-compact">
+        <div class="text-muted" style="font-size:12px;">${escapeHtml(
+          targetDay
+        )} 当日消费</div>
+        <div class="metric-big num ${targetDayTotalCents > 0 ? "text-loss" : ""}">
+          ${
+            targetDayTotalCents > 0
+              ? "-" + formatMoney(targetDayTotalCents, { masked })
+              : formatMoney(0, { masked })
+          }
+        </div>
+        <div class="text-subtle num" style="font-size:11.5px;margin-top:4px;">
+          当日共记 ${targetDayCount} 笔
+        </div>
+      </div>
+
+      <div class="card card-compact">
+        <div class="text-muted" style="font-size:12px;">${escapeHtml(
+          activeMonth
+        )} 月度累计消费</div>
+        <div class="metric-big num ${selectedMonthTotalCents > 0 ? "text-loss" : ""}">
+          ${formatMoney(selectedMonthTotalCents, { masked })}
+        </div>
+        <div class="text-subtle num" style="font-size:11.5px;margin-top:4px;">
+          日常日均 ${formatMoney(selectedMonthAvgCents, { masked })}/天（已剔除大额偶发）
+        </div>
+      </div>
+
+      <div class="card card-compact">
+        <div class="text-muted" style="font-size:12px;display:flex;justify-content:space-between;">
+          <span>月度预算执行</span>
+          ${
+            budgetCents > 0
+              ? `<span class="num">${Math.round(
+                  (selectedMonthTotalCents / budgetCents) * 100
+                )}%</span>`
+              : ""
+          }
+        </div>
+        ${
+          budgetCents > 0
+            ? `
+              <div class="metric-big num ${budgetRemainingCents < 0 ? "text-loss" : ""}">
+                ${
+                  budgetRemainingCents >= 0
+                    ? `剩余 ${formatMoney(budgetRemainingCents, { masked })}`
+                    : `超支 ${formatMoney(Math.abs(budgetRemainingCents), { masked })}`
+                }
+              </div>
+              <div class="util-bar" style="width:100%;height:6px;margin-top:9px;">
+                <div class="util-fill ${
+                  selectedMonthTotalCents >= budgetCents * 0.85 ? "high" : ""
+                }" style="width:${budgetUsedPct}%"></div>
+              </div>
+            `
+            : `
+              <div style="margin-top:10px;">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-empty-budget">
+                  点击设置每月消费预算上限
+                </button>
+              </div>
+              <div class="text-subtle" style="font-size:11.5px;margin-top:8px;">
+                设好后超过 85% 自动红色预警
+              </div>
+            `
+        }
+      </div>
+    </section>
+
+    ${
+      sortedCats.length > 0 && selectedMonthTotalCents > 0
+        ? `
+      <section class="card card-compact">
+        <div style="font-size:13px;font-weight:600;color:var(--ink);margin-bottom:10px;">
+          ${escapeHtml(activeMonth)} 消费分类构成
+        </div>
+        <div class="ratio-bar" style="margin-top:0;height:8px;">
+          ${sortedCats
+            .map(([cat, amt], i) => {
+              const pct = Math.max(1, Math.round((amt / selectedMonthTotalCents) * 100));
+              return `<div style="width:${pct}%;background:${
+                barShades[i % barShades.length]
+              };" title="${escapeHtml(
+                EXPENSE_CATEGORY_LABELS[cat] || cat
+              )} ${pct}%"></div>`;
+            })
+            .join("")}
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;font-size:12px;">
+          ${sortedCats
+            .map(([cat, amt], i) => {
+              const pct = Math.round((amt / selectedMonthTotalCents) * 100);
+              return `
+                <div class="num" style="display:inline-flex;align-items:center;gap:6px;color:var(--ink-secondary);">
+                  <span style="width:8px;height:8px;border-radius:50%;background:${
+                    barShades[i % barShades.length]
+                  };display:inline-block;"></span>
+                  <span>${escapeHtml(EXPENSE_CATEGORY_LABELS[cat] || cat)}</span>
+                  <strong style="font-weight:600;">${formatMoney(amt, { masked })}</strong>
+                  <span class="text-subtle">(${pct}%)</span>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      </section>`
+        : ""
+    }
+
+    <section class="card">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">每日消费明细</h2>
+          <p class="card-subtitle">极简记录每笔日常开支，支持按月统计与按日回看</p>
+        </div>
+        <button type="button" class="btn btn-primary btn-sm" id="btn-add-expense">
+          ${icons.plus} 记一笔消费
+        </button>
+      </div>
+
+      <div class="date-chip-row">
+        <input type="month" id="expense-month-picker" class="input input-sm num" style="width:auto;" value="${escapeHtml(
+          activeMonth
+        )}" title="切换月份" />
+        <button type="button" class="btn ${
+          filterDate === "" ? "btn-primary" : "btn-secondary"
+        } btn-sm" data-exp-date="">当月全部 (${monthRecords.length})</button>
+        <button type="button" class="btn ${
+          filterDate === today ? "btn-primary" : "btn-secondary"
+        } btn-sm" data-exp-date="${escapeHtml(today)}">今天 (${escapeHtml(
+    today.slice(5)
+  )})</button>
+        ${recentMonthDates
+          .filter((d) => d !== today)
+          .map(
+            (d) => `
+          <button type="button" class="btn ${
+            filterDate === d ? "btn-primary" : "btn-secondary"
+          } btn-sm num" data-exp-date="${escapeHtml(d)}">${escapeHtml(d.slice(5))}</button>`
+          )
+          .join("")}
+        <input type="date" id="expense-date-picker" class="input input-sm num" style="width:auto;" value="${escapeHtml(
+          filterDate
+        )}" title="按具体某天筛选" />
+      </div>
+
+      ${
+        displayedRecords.length === 0
+          ? `<div class="empty-box">${
+              filterDate
+                ? `${escapeHtml(filterDate)} 暂无消费记录`
+                : `${escapeHtml(activeMonth)} 暂无消费记录，点击右上角「记一笔消费」开始记录。`
+            }</div>`
+          : `<div class="table-wrap">
+              <table class="clean-table">
+                <thead>
+                  <tr>
+                    <th>日期</th>
+                    <th>分类</th>
+                    <th>说明 / 备注</th>
+                    <th class="right">支出金额</th>
+                    <th class="right">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${displayedRecords
+                    .map(
+                      (r) => `
+                    <tr>
+                      <td class="num">${escapeHtml(r.expense_date)}</td>
+                      <td>
+                        <span class="pill pill-neutral">${escapeHtml(
+                          EXPENSE_CATEGORY_LABELS[r.category] || r.category
+                        )}</span>
+                      </td>
+                      <td>
+                        <span style="color:var(--ink);font-weight:${
+                          r.note ? "500" : "400"
+                        };">${escapeHtml(
+                        r.note || EXPENSE_CATEGORY_LABELS[r.category] || "日常消费"
+                      )}</span>
+                        ${
+                          Number(r.is_large)
+                            ? `<span class="pill pill-neutral" style="margin-left:6px;padding:1px 7px;font-size:11px;">大额/偶发</span>`
+                            : ""
+                        }
+                      </td>
+                      <td class="right num text-loss" style="font-weight:600;">
+                        -${formatMoney(r.amount_cents, { masked })}
+                      </td>
+                      <td class="right" style="white-space:nowrap;">
+                        <button type="button" class="btn btn-ghost btn-sm" data-edit-exp="${
+                          r.id
+                        }" title="编辑">${icons.edit}</button>
+                        <button type="button" class="btn btn-danger-ghost btn-sm" data-del-exp="${
+                          r.id
+                        }" title="删除">${icons.trash}</button>
+                      </td>
+                    </tr>`
+                    )
+                    .join("")}
+                </tbody>
+              </table>
+            </div>`
+      }
+    </section>
+  `;
+
+  container.querySelector("#btn-set-budget").addEventListener("click", () => {
+    openBudgetModal();
+  });
+  const emptyBudgetBtn = container.querySelector("#btn-empty-budget");
+  if (emptyBudgetBtn) {
+    emptyBudgetBtn.addEventListener("click", () => openBudgetModal());
+  }
+
+  container.querySelector("#btn-add-expense").addEventListener("click", () => {
+    openExpenseModal(null, filterDate || today);
+  });
+
+  container.querySelector("#expense-month-picker").addEventListener("change", (e) => {
+    state.expenseFilterMonth = e.target.value || today.slice(0, 7);
+    state.expenseFilterDate = "";
+    renderMainApp();
+  });
+
+  container.querySelectorAll("[data-exp-date]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const d = btn.getAttribute("data-exp-date") || "";
+      state.expenseFilterDate = d;
+      if (d) state.expenseFilterMonth = d.slice(0, 7);
+      renderMainApp();
+    });
+  });
+
+  container.querySelector("#expense-date-picker").addEventListener("change", (e) => {
+    const d = e.target.value || "";
+    state.expenseFilterDate = d;
+    if (d) state.expenseFilterMonth = d.slice(0, 7);
+    renderMainApp();
+  });
+
+  container.querySelectorAll("[data-edit-exp]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = Number(btn.getAttribute("data-edit-exp"));
+      const item = expenseRecords.find((x) => x.id === id);
+      if (item) openExpenseModal(item);
+    });
+  });
+
+  container.querySelectorAll("[data-del-exp]").forEach((btn) => {
+    bindSafeClick(btn, async () => {
+      const id = btn.getAttribute("data-del-exp");
+      if (!confirm("确定删除这笔消费记录吗？")) return;
+      try {
+        await apiFetch(`/api/expenses?id=${id}`, { method: "DELETE" });
+        showToast("消费记录已删除");
+        await refreshDashboard();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  });
+}
+
 async function toggleValuationMode(mode) {
   try {
     await apiFetch("/api/settings", {
@@ -2135,6 +2525,148 @@ function openStockpileModal(existing = null) {
   });
 }
 
+// 7.55 记一笔消费弹窗
+function openExpenseModal(existing = null, defaultDate = "") {
+  const isEdit = Boolean(existing?.id);
+  const cat = existing?.category || "dining";
+  const dateVal = existing?.expense_date || defaultDate || state.dashboard.today;
+
+  modalRoot.innerHTML = `
+    <div class="modal-backdrop" id="modal-bg">
+      <div class="modal-panel">
+        <div class="modal-header">
+          <h3 class="modal-title">${isEdit ? "编辑消费记录" : "记一笔消费"}</h3>
+          <button type="button" class="btn btn-ghost btn-sm" id="modal-close">${icons.close}</button>
+        </div>
+        <form id="expense-form" class="form-grid">
+          <div class="form-field">
+            <label class="form-label">日期</label>
+            <input type="date" class="input num" name="expense_date" required value="${escapeHtml(
+              dateVal
+            )}" />
+          </div>
+          <div class="form-field">
+            <label class="form-label">消费分类</label>
+            <select class="select" name="category">
+              ${Object.entries(EXPENSE_CATEGORY_LABELS)
+                .map(
+                  ([val, label]) =>
+                    `<option value="${val}" ${cat === val ? "selected" : ""}>${escapeHtml(
+                      label
+                    )}</option>`
+                )
+                .join("")}
+            </select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">金额（元）</label>
+            <input class="input num" id="expense-amount-input" name="amount_yuan" required value="${
+              existing ? centsToInputYuan(existing.amount_cents) : ""
+            }" placeholder="如 28.50" />
+          </div>
+          <div class="form-field">
+            <label class="form-label">说明 / 备注（选填）</label>
+            <input class="input" name="note" value="${escapeHtml(
+              existing?.note || ""
+            )}" placeholder="如：午餐、山姆超市、打车" />
+          </div>
+          <div class="form-field full" style="margin-top:2px;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink-secondary);cursor:pointer;">
+              <input type="checkbox" name="is_large" ${
+                Number(existing?.is_large) ? "checked" : ""
+              } />
+              <span>标记为「大额 / 偶发支出」（如房租、数码大件，计算日常日均生活费时自动剔除）</span>
+            </label>
+          </div>
+          <div id="modal-err" class="form-field full"></div>
+          <div class="modal-footer" style="margin-top:6px;">
+            <button type="button" class="btn btn-secondary" id="modal-cancel">取消</button>
+            <button type="submit" class="btn btn-primary">保存消费</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+
+  bindModalDismiss();
+  const amtInput = document.getElementById("expense-amount-input");
+  if (!isEdit && amtInput) {
+    amtInput.focus();
+  }
+
+  bindSafeSubmit(document.getElementById("expense-form"), async (e) => {
+    const fd = new FormData(e.target);
+    const errEl = document.getElementById("modal-err");
+    errEl.innerHTML = "";
+    try {
+      await apiFetch("/api/expenses", {
+        method: isEdit ? "PUT" : "POST",
+        body: {
+          id: existing?.id,
+          expense_date: fd.get("expense_date"),
+          category: fd.get("category"),
+          amount_yuan: fd.get("amount_yuan"),
+          note: fd.get("note"),
+          is_large: fd.get("is_large") === "on",
+        },
+      });
+      closeModal();
+      showToast(isEdit ? "消费记录已更新" : "已记一笔消费");
+      await refreshDashboard();
+    } catch (err) {
+      errEl.innerHTML = `<div class="error-box">${escapeHtml(err.message)}</div>`;
+    }
+  });
+}
+
+// 7.56 月度消费预算设置弹窗
+function openBudgetModal() {
+  const currentBudget = Number(state.dashboard.metrics.monthlyBudgetCents || 0);
+
+  modalRoot.innerHTML = `
+    <div class="modal-backdrop" id="modal-bg">
+      <div class="modal-panel">
+        <div class="modal-header">
+          <h3 class="modal-title">设置月度消费预算上限</h3>
+          <button type="button" class="btn btn-ghost btn-sm" id="modal-close">${icons.close}</button>
+        </div>
+        <form id="budget-form" style="display:flex;flex-direction:column;gap:14px;">
+          <div class="form-field">
+            <label class="form-label">每月预算金额（元，填 0 表示关闭预算进度条）</label>
+            <input class="input num" id="budget-input" name="monthly_budget_yuan" required value="${
+              currentBudget > 0 ? centsToInputYuan(currentBudget) : "0"
+            }" placeholder="如 4000" />
+            <span class="form-hint">当月累计消费达到预算的 85% 时，进度条将变为红色提醒克制开支。</span>
+          </div>
+          <div id="modal-err"></div>
+          <div class="modal-footer" style="margin-top:4px;">
+            <button type="button" class="btn btn-secondary" id="modal-cancel">取消</button>
+            <button type="submit" class="btn btn-primary">保存预算</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+
+  bindModalDismiss();
+  bindSafeSubmit(document.getElementById("budget-form"), async (e) => {
+    const fd = new FormData(e.target);
+    const errEl = document.getElementById("modal-err");
+    errEl.innerHTML = "";
+    try {
+      await apiFetch("/api/settings", {
+        method: "PATCH",
+        body: { monthly_budget_yuan: fd.get("monthly_budget_yuan") },
+      });
+      closeModal();
+      showToast("月度预算已更新");
+      await refreshDashboard();
+    } catch (err) {
+      errEl.innerHTML = `<div class="error-box">${escapeHtml(err.message)}</div>`;
+    }
+  });
+}
+
 // 7.6 指定日期快照弹窗
 function openCustomSnapshotModal() {
   modalRoot.innerHTML = `
@@ -2214,6 +2746,19 @@ function openSettingsModal() {
             </div>
           </div>
 
+          <!-- 月度消费预算 -->
+          <form id="settings-budget-form" style="padding-bottom:16px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;">
+            <div style="font-size:13px;font-weight:600;">月度消费预算上限（元，填 0 关闭提醒）</div>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input class="input input-sm num" name="monthly_budget_yuan" value="${
+                metrics.monthlyBudgetCents > 0
+                  ? centsToInputYuan(metrics.monthlyBudgetCents)
+                  : "0"
+              }" placeholder="如 4000" style="max-width:200px;" />
+              <button type="submit" class="btn btn-secondary btn-sm">保存预算</button>
+            </div>
+          </form>
+
           <!-- 数据导出备份 -->
           <div style="padding-bottom:16px;border-bottom:1px solid var(--border);">
             <div style="font-size:13px;font-weight:600;margin-bottom:4px;">个人数据导出与备份</div>
@@ -2264,6 +2809,25 @@ function openSettingsModal() {
       closeModal();
     });
   });
+
+  bindSafeSubmit(
+    document.getElementById("settings-budget-form"),
+    async (e) => {
+      const fd = new FormData(e.target);
+      try {
+        await apiFetch("/api/settings", {
+          method: "PATCH",
+          body: { monthly_budget_yuan: fd.get("monthly_budget_yuan") },
+        });
+        modalDirty = false;
+        showToast("月度预算已保存");
+        await refreshDashboard();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    },
+    "保存中…"
+  );
 
   bindSafeSubmit(
     document.getElementById("pwd-form"),

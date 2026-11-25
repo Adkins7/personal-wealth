@@ -28,6 +28,16 @@ const VALID_CREDIT_CATEGORIES = ["credit_card", "huabei", "baitiao", "other"];
 const VALID_FUND_CATEGORIES = ["stock", "fund", "debit_card", "wechat_pay", "other"];
 const VALID_WOOL_TYPES = ["instant_discount", "coupon", "resale", "cashback", "other"];
 const VALID_WOOL_STATUSES = ["pending", "sold", "expired"];
+const VALID_EXPENSE_CATEGORIES = [
+  "dining",
+  "shopping",
+  "transport",
+  "housing",
+  "entertainment",
+  "medical",
+  "social",
+  "other",
+];
 
 function sendJson(res, status, data, extraHeaders = {}) {
   if (status >= 400 && res._idemKey) {
@@ -260,6 +270,14 @@ export async function handleApiRequest(req, res, urlObj) {
         }
         await db.run("UPDATE users SET stockpile_valuation_mode = ? WHERE id = ?", [
           mode,
+          user.id,
+        ]);
+      }
+
+      if (body.monthly_budget_yuan !== undefined) {
+        const budgetCents = yuanToCents(body.monthly_budget_yuan, false);
+        await db.run("UPDATE users SET monthly_budget_cents = ? WHERE id = ?", [
+          budgetCents,
           user.id,
         ]);
       }
@@ -769,6 +787,82 @@ export async function handleApiRequest(req, res, urlObj) {
       }
     }
 
+    // 11.5 每日消费记录 CRUD（独立流量指标，不二次扣减净资产）
+    if (pathname === "/api/expenses") {
+      const db = await getDb();
+      const now = getNowTimestampString();
+
+      if (method === "POST") {
+        const body = await readJsonBody(req);
+        const expenseDate = String(body.expense_date ?? "").trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(expenseDate)) {
+          return sendJson(res, 400, { error: "请选择有效的消费日期" });
+        }
+        const category = body.category;
+        if (!VALID_EXPENSE_CATEGORIES.includes(category)) {
+          return sendJson(res, 400, { error: "无效的消费分类" });
+        }
+        const amountCents = yuanToCents(body.amount_yuan, false);
+        if (amountCents <= 0) {
+          return sendJson(res, 400, { error: "消费金额需大于 0" });
+        }
+        const isLarge = body.is_large ? 1 : 0;
+        const note = String(body.note ?? "").trim();
+
+        const inserted = await db.get(
+          `INSERT INTO daily_expenses
+            (user_id, expense_date, category, amount_cents, is_large, note, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+          [user.id, expenseDate, category, amountCents, isLarge, note, now]
+        );
+        return sendJson(res, 200, { ok: true, id: Number(inserted.id) });
+      }
+
+      if (method === "PUT") {
+        const body = await readJsonBody(req);
+        const id = Number(body.id);
+        if (!id) return sendJson(res, 400, { error: "缺少消费记录 ID" });
+        const expenseDate = String(body.expense_date ?? "").trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(expenseDate)) {
+          return sendJson(res, 400, { error: "请选择有效的消费日期" });
+        }
+        const category = body.category;
+        if (!VALID_EXPENSE_CATEGORIES.includes(category)) {
+          return sendJson(res, 400, { error: "无效的消费分类" });
+        }
+        const amountCents = yuanToCents(body.amount_yuan, false);
+        if (amountCents <= 0) {
+          return sendJson(res, 400, { error: "消费金额需大于 0" });
+        }
+        const isLarge = body.is_large ? 1 : 0;
+        const note = String(body.note ?? "").trim();
+
+        const r = await db.run(
+          `UPDATE daily_expenses
+           SET expense_date = ?, category = ?, amount_cents = ?, is_large = ?, note = ?
+           WHERE id = ? AND user_id = ?`,
+          [expenseDate, category, amountCents, isLarge, note, id, user.id]
+        );
+        if (r.changes === 0) {
+          return sendJson(res, 404, { error: "记录不存在或无权限操作" });
+        }
+        return sendJson(res, 200, { ok: true });
+      }
+
+      if (method === "DELETE") {
+        const id = Number(searchParams.get("id"));
+        if (!id) return sendJson(res, 400, { error: "缺少记录 ID" });
+        const r = await db.run(
+          "DELETE FROM daily_expenses WHERE id = ? AND user_id = ?",
+          [id, user.id]
+        );
+        if (r.changes === 0) {
+          return sendJson(res, 404, { error: "记录不存在或无权限操作" });
+        }
+        return sendJson(res, 200, { ok: true });
+      }
+    }
+
     // 12. 每日资产快照记录与删除
     if (pathname === "/api/snapshots") {
       if (method === "POST") {
@@ -818,6 +912,7 @@ export async function handleApiRequest(req, res, urlObj) {
             "囤货计入金额(元)",
             "囤货统计口径",
             "当日投资盈亏(元)[独立展示]",
+            "当日消费支出(元)[独立展示]",
             "当日羊毛结余(元)[独立展示]",
             "备注",
           ].join(",")
@@ -836,6 +931,7 @@ export async function handleApiRequest(req, res, urlObj) {
               centsToYuanString(s.stockpile_value_cents),
               s.stockpile_mode_used === "market" ? "当前估值" : "成本价",
               centsToYuanString(s.daily_investment_pnl_cents),
+              centsToYuanString(s.daily_expense_cents ?? 0),
               centsToYuanString(s.wool_daily_balance_cents),
               csvEscape(s.note),
             ].join(",")
@@ -949,6 +1045,21 @@ export async function handleApiRequest(req, res, urlObj) {
           );
         }
 
+        lines.push("");
+        lines.push("# 每日消费记录（独立展示，不二次扣减净资产）");
+        lines.push(["日期", "分类", "金额(元)", "是否大额/偶发", "备注"].join(","));
+        for (const exp of payload.expenseRecords) {
+          lines.push(
+            [
+              exp.expense_date,
+              exp.category,
+              centsToYuanString(exp.amount_cents),
+              Number(exp.is_large) ? "是" : "否",
+              csvEscape(exp.note),
+            ].join(",")
+          );
+        }
+
         const csvContent = "\uFEFF" + lines.join("\r\n");
         res.writeHead(200, {
           "Content-Type": "text/csv; charset=utf-8",
@@ -963,8 +1074,10 @@ export async function handleApiRequest(req, res, urlObj) {
           exportedAt: new Date().toISOString(),
           username: payload.user.username,
           stockpileValuationMode: payload.user.stockpile_valuation_mode,
+          monthlyBudgetCents: payload.user.monthly_budget_cents,
           fundAccounts: payload.fundAccounts,
           creditAccounts: payload.creditAccounts,
+          expenseRecords: payload.expenseRecords,
           woolRecords: payload.woolRecords,
           stockpileItems: payload.stockpileItems,
           snapshots: payload.snapshots,
@@ -1013,8 +1126,8 @@ export async function captureSnapshotForDate(user, snapshotDate, note) {
     `INSERT INTO daily_snapshots (
       user_id, snapshot_date, total_funds_cents, total_debt_cents,
       stockpile_cost_cents, stockpile_market_cents, stockpile_value_cents, stockpile_mode_used,
-      net_worth_cents, daily_investment_pnl_cents, wool_daily_balance_cents, detail_json, note, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      net_worth_cents, daily_investment_pnl_cents, wool_daily_balance_cents, daily_expense_cents, detail_json, note, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(user_id, snapshot_date) DO UPDATE SET
       total_funds_cents = excluded.total_funds_cents,
       total_debt_cents = excluded.total_debt_cents,
@@ -1025,6 +1138,7 @@ export async function captureSnapshotForDate(user, snapshotDate, note) {
       net_worth_cents = excluded.net_worth_cents,
       daily_investment_pnl_cents = excluded.daily_investment_pnl_cents,
       wool_daily_balance_cents = excluded.wool_daily_balance_cents,
+      daily_expense_cents = excluded.daily_expense_cents,
       detail_json = excluded.detail_json,
       note = CASE WHEN excluded.note != '' THEN excluded.note ELSE daily_snapshots.note END,
       updated_at = excluded.updated_at`,
@@ -1040,6 +1154,7 @@ export async function captureSnapshotForDate(user, snapshotDate, note) {
       metrics.netWorthCents,
       metrics.dailyInvestmentPnlCents,
       metrics.woolTodayBalanceCents,
+      metrics.expenseTodayCents,
       detailJson,
       note,
       now,
