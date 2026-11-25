@@ -1,3 +1,15 @@
+let activeModalRequestKey = "";
+
+export function resetModalRequestKey() {
+  activeModalRequestKey = `${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
+export function clearModalRequestKey() {
+  activeModalRequestKey = "";
+}
+
 export async function apiFetch(url, options = {}) {
   const method = (options.method || "GET").toUpperCase();
   const headers = {
@@ -5,6 +17,9 @@ export async function apiFetch(url, options = {}) {
   };
   if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
     headers["X-Requested-With"] = "PersonalWealth";
+  }
+  if (method === "POST" && activeModalRequestKey && !headers["X-Idempotency-Key"]) {
+    headers["X-Idempotency-Key"] = `${method}:${url}:${activeModalRequestKey}`;
   }
   if (options.body && typeof options.body === "object") {
     headers["Content-Type"] = "application/json";

@@ -1,4 +1,4 @@
-import { apiFetch } from "./api.js";
+import { apiFetch, clearModalRequestKey, resetModalRequestKey } from "./api.js";
 import { renderNetWorthChart } from "./chart.js";
 import {
   COMMON_BANKS,
@@ -46,7 +46,56 @@ let modalDirty = false;
 
 function closeModal() {
   modalDirty = false;
+  clearModalRequestKey();
   modalRoot.innerHTML = "";
+}
+
+/**
+ * 通用防连点表单提交锁：首次点击立即锁定表单并禁用提交按钮，请求未结束前忽略后续重复点击或回车。
+ * 若请求报错，自动生成新的幂等键并恢复按钮，方便用户修改后重试。
+ */
+function bindSafeSubmit(formEl, asyncHandler, loadingText = "正在保存…") {
+  if (!formEl) return;
+  formEl.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (formEl.dataset.submitting === "1") return;
+    formEl.dataset.submitting = "1";
+
+    const submitBtn = formEl.querySelector('button[type="submit"]');
+    const origHtml = submitBtn ? submitBtn.innerHTML : "";
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = loadingText;
+    }
+
+    try {
+      await asyncHandler(e);
+    } finally {
+      formEl.dataset.submitting = "0";
+      if (submitBtn && submitBtn.isConnected) {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = origHtml;
+        resetModalRequestKey();
+      }
+    }
+  });
+}
+
+function bindSafeClick(btnEl, asyncHandler) {
+  if (!btnEl) return;
+  btnEl.addEventListener("click", async (e) => {
+    if (btnEl.dataset.busy === "1") return;
+    btnEl.dataset.busy = "1";
+    btnEl.disabled = true;
+    try {
+      await asyncHandler(e);
+    } finally {
+      btnEl.dataset.busy = "0";
+      if (btnEl.isConnected) {
+        btnEl.disabled = false;
+      }
+    }
+  });
 }
 
 function requestCloseModal() {
@@ -183,31 +232,34 @@ function renderAuth() {
 
   const form = document.getElementById("auth-form");
   const errBox = document.getElementById("auth-error");
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    errBox.innerHTML = "";
-    const fd = new FormData(form);
-    const username = String(fd.get("username") || "").trim();
-    const password = String(fd.get("password") || "");
-    const confirmPassword = String(fd.get("confirmPassword") || "");
+  bindSafeSubmit(
+    form,
+    async () => {
+      errBox.innerHTML = "";
+      const fd = new FormData(form);
+      const username = String(fd.get("username") || "").trim();
+      const password = String(fd.get("password") || "");
+      const confirmPassword = String(fd.get("confirmPassword") || "");
 
-    if (isReg && password !== confirmPassword) {
-      errBox.innerHTML = `<div class="error-box">两次输入的密码不一致</div>`;
-      return;
-    }
+      if (isReg && password !== confirmPassword) {
+        errBox.innerHTML = `<div class="error-box">两次输入的密码不一致</div>`;
+        return;
+      }
 
-    try {
-      await apiFetch(isReg ? "/api/auth/register" : "/api/auth/login", {
-        method: "POST",
-        body: { username, password },
-      });
-      state.authenticated = true;
-      state.hasAnyUser = true;
-      await refreshDashboard();
-    } catch (err) {
-      errBox.innerHTML = `<div class="error-box">${escapeHtml(err.message)}</div>`;
-    }
-  });
+      try {
+        await apiFetch(isReg ? "/api/auth/register" : "/api/auth/login", {
+          method: "POST",
+          body: { username, password },
+        });
+        state.authenticated = true;
+        state.hasAnyUser = true;
+        await refreshDashboard();
+      } catch (err) {
+        errBox.innerHTML = `<div class="error-box">${escapeHtml(err.message)}</div>`;
+      }
+    },
+    "正在验证…"
+  );
 }
 
 /* ========================= 2. 主仪表盘框架 ========================= */
@@ -281,7 +333,7 @@ function renderMainApp() {
     openQuickCheckinModal();
   });
 
-  document.getElementById("btn-save-snapshot").addEventListener("click", async () => {
+  bindSafeClick(document.getElementById("btn-save-snapshot"), async () => {
     try {
       await apiFetch("/api/snapshots", {
         method: "POST",
@@ -1490,8 +1542,7 @@ function openQuickCheckinModal() {
     });
   });
 
-  document.getElementById("quick-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
+  bindSafeSubmit(document.getElementById("quick-form"), async () => {
     const errEl = document.getElementById("modal-err");
     errEl.innerHTML = "";
 
@@ -1630,8 +1681,7 @@ function openFundModal(existing = null) {
   catSelect.addEventListener("change", syncFundFields);
   bankSelect.addEventListener("change", syncFundFields);
 
-  document.getElementById("fund-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
+  bindSafeSubmit(document.getElementById("fund-form"), async (e) => {
     const fd = new FormData(e.target);
     const errEl = document.getElementById("modal-err");
     errEl.innerHTML = "";
@@ -1835,8 +1885,7 @@ function openCreditModal(existing = null) {
   limitInput.addEventListener("input", updateDebtPreview);
   remainingInput.addEventListener("input", updateDebtPreview);
 
-  document.getElementById("credit-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
+  bindSafeSubmit(document.getElementById("credit-form"), async (e) => {
     const fd = new FormData(e.target);
     const errEl = document.getElementById("modal-err");
     errEl.innerHTML = "";
@@ -1973,8 +2022,7 @@ function openWoolModal(existing = null, defaultDate = "") {
   syncIncomeVisibility();
   statusSelect.addEventListener("change", syncIncomeVisibility);
 
-  document.getElementById("wool-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
+  bindSafeSubmit(document.getElementById("wool-form"), async (e) => {
     const fd = new FormData(e.target);
     const errEl = document.getElementById("modal-err");
     errEl.innerHTML = "";
@@ -2061,8 +2109,7 @@ function openStockpileModal(existing = null) {
   `;
 
   bindModalDismiss();
-  document.getElementById("stockpile-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
+  bindSafeSubmit(document.getElementById("stockpile-form"), async (e) => {
     const fd = new FormData(e.target);
     const errEl = document.getElementById("modal-err");
     errEl.innerHTML = "";
@@ -2120,8 +2167,7 @@ function openCustomSnapshotModal() {
   `;
 
   bindModalDismiss();
-  document.getElementById("snap-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
+  bindSafeSubmit(document.getElementById("snap-form"), async (e) => {
     const fd = new FormData(e.target);
     const errEl = document.getElementById("modal-err");
     errEl.innerHTML = "";
@@ -2219,26 +2265,29 @@ function openSettingsModal() {
     });
   });
 
-  document.getElementById("pwd-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const msgEl = document.getElementById("pwd-msg");
-    msgEl.innerHTML = "";
-    try {
-      await apiFetch("/api/settings", {
-        method: "PATCH",
-        body: {
-          currentPassword: fd.get("currentPassword"),
-          newPassword: fd.get("newPassword"),
-        },
-      });
-      e.target.reset();
-      modalDirty = false;
-      showToast("登录密码已更新");
-    } catch (err) {
-      msgEl.innerHTML = `<div class="error-box">${escapeHtml(err.message)}</div>`;
-    }
-  });
+  bindSafeSubmit(
+    document.getElementById("pwd-form"),
+    async (e) => {
+      const fd = new FormData(e.target);
+      const msgEl = document.getElementById("pwd-msg");
+      msgEl.innerHTML = "";
+      try {
+        await apiFetch("/api/settings", {
+          method: "PATCH",
+          body: {
+            currentPassword: fd.get("currentPassword"),
+            newPassword: fd.get("newPassword"),
+          },
+        });
+        e.target.reset();
+        modalDirty = false;
+        showToast("登录密码已更新");
+      } catch (err) {
+        msgEl.innerHTML = `<div class="error-box">${escapeHtml(err.message)}</div>`;
+      }
+    },
+    "正在更新…"
+  );
 
   document.getElementById("btn-logout").addEventListener("click", async () => {
     await apiFetch("/api/auth/logout", { method: "POST" });
@@ -2251,6 +2300,7 @@ function openSettingsModal() {
 
 function bindModalDismiss() {
   modalDirty = false;
+  resetModalRequestKey();
   const bg = document.getElementById("modal-bg");
   const panel = modalRoot.querySelector(".modal-panel");
   const closeBtn = document.getElementById("modal-close");

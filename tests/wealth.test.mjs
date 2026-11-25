@@ -27,8 +27,11 @@ async function startTestServer() {
 function createClient(baseUrl) {
   let cookie = "";
   return {
-    async request(path, { method = "GET", body, includeCsrf = true } = {}) {
-      const headers = {};
+    async request(
+      path,
+      { method = "GET", body, includeCsrf = true, extraHeaders = {} } = {}
+    ) {
+      const headers = { ...extraHeaders };
       if (cookie) headers["Cookie"] = cookie;
       if (includeCsrf && ["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
         headers["X-Requested-With"] = "PersonalWealth";
@@ -273,6 +276,28 @@ test("端到端核验：安全认证、权限隔离、防敏感卡号、资产�
     body: { username: "charlie", password: "CharliePassword123" },
   });
   assert.equal(regCharlie.status, 403);
+
+  // 验证快速连点防重幂等键：并发发送两次携带相同 X-Idempotency-Key 的 POST 请求只写入 1 条记录
+  const dupBody = {
+    name: "花旦币",
+    quantity: 1,
+    unit: "件",
+    cost_unit_price_yuan: "100",
+  };
+  await Promise.all([
+    bob.request("/api/stockpile-items", {
+      method: "POST",
+      body: dupBody,
+      extraHeaders: { "X-Idempotency-Key": "POST:/api/stockpile-items:testkey1" },
+    }),
+    bob.request("/api/stockpile-items", {
+      method: "POST",
+      body: dupBody,
+      extraHeaders: { "X-Idempotency-Key": "POST:/api/stockpile-items:testkey1" },
+    }),
+  ]);
+  const bobAfterDup = (await bob.request("/api/dashboard")).data;
+  assert.equal(bobAfterDup.stockpileItems.length, 1);
 
   // 验证 Vercel Serverless Rewrite 入口 (/api/index?__path=auth/status)
   const vercelSimServer = http.createServer((req, res) => vercelHandler(req, res));

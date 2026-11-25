@@ -30,6 +30,9 @@ const VALID_WOOL_TYPES = ["instant_discount", "coupon", "resale", "cashback", "o
 const VALID_WOOL_STATUSES = ["pending", "sold", "expired"];
 
 function sendJson(res, status, data, extraHeaders = {}) {
+  if (status >= 400 && res._idemKey) {
+    recentIdempotencyKeys.delete(res._idemKey);
+  }
   const body = JSON.stringify(data);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
@@ -80,6 +83,24 @@ function csvEscape(val) {
   return str;
 }
 
+const recentIdempotencyKeys = new Map();
+
+function checkAndLockIdempotencyKey(key) {
+  if (!key) return { duplicate: false };
+  const now = Date.now();
+  if (recentIdempotencyKeys.size > 500) {
+    for (const [k, exp] of recentIdempotencyKeys.entries()) {
+      if (exp <= now) recentIdempotencyKeys.delete(k);
+    }
+  }
+  const existingExp = recentIdempotencyKeys.get(key);
+  if (existingExp && existingExp > now) {
+    return { duplicate: true };
+  }
+  recentIdempotencyKeys.set(key, now + 60 * 1000);
+  return { duplicate: false };
+}
+
 export async function handleApiRequest(req, res, urlObj) {
   const { pathname, searchParams } = urlObj;
   const method = req.method || "GET";
@@ -89,6 +110,17 @@ export async function handleApiRequest(req, res, urlObj) {
     if (csrfHeader !== "PersonalWealth") {
       return sendJson(res, 403, { error: "安全校验未通过（缺少有效请求标识）" });
     }
+  }
+
+  const rawIdem =
+    method === "POST" ? String(req.headers["x-idempotency-key"] || "").trim() : "";
+  if (rawIdem) {
+    const scopedIdem = `${req.headers.cookie || "anon"}::${rawIdem}`;
+    const { duplicate } = checkAndLockIdempotencyKey(scopedIdem);
+    if (duplicate) {
+      return sendJson(res, 200, { ok: true, deduplicated: true });
+    }
+    res._idemKey = scopedIdem;
   }
 
   try {
