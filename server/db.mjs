@@ -69,6 +69,7 @@ const SQLITE_DDL = [
     bank_or_platform TEXT NOT NULL,
     card_alias TEXT NOT NULL DEFAULT '',
     credit_limit_cents INTEGER NOT NULL DEFAULT 0,
+    remaining_limit_cents INTEGER NOT NULL DEFAULT 0,
     current_debt_cents INTEGER NOT NULL DEFAULT 0,
     sort_order INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
@@ -164,10 +165,15 @@ const POSTGRES_DDL = [
     bank_or_platform TEXT NOT NULL,
     card_alias TEXT NOT NULL DEFAULT '',
     credit_limit_cents BIGINT NOT NULL DEFAULT 0,
+    remaining_limit_cents BIGINT NOT NULL DEFAULT 0,
     current_debt_cents BIGINT NOT NULL DEFAULT 0,
     sort_order INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
   )`,
+  `ALTER TABLE credit_accounts ADD COLUMN IF NOT EXISTS remaining_limit_cents BIGINT`,
+  `UPDATE credit_accounts SET remaining_limit_cents = CASE WHEN category = 'credit_card' THEN GREATEST(0, credit_limit_cents - current_debt_cents) ELSE 0 END WHERE remaining_limit_cents IS NULL`,
+  `ALTER TABLE credit_accounts ALTER COLUMN remaining_limit_cents SET DEFAULT 0`,
+  `ALTER TABLE credit_accounts ALTER COLUMN remaining_limit_cents SET NOT NULL`,
   `CREATE INDEX IF NOT EXISTS idx_credit_accounts_user ON credit_accounts(user_id)`,
   `CREATE TABLE IF NOT EXISTS fund_accounts (
     id BIGSERIAL PRIMARY KEY,
@@ -235,6 +241,13 @@ function createLocalSqliteAdapter(rawDb) {
   for (const ddl of SQLITE_DDL) {
     rawDb.exec(ddl);
   }
+  const cols = rawDb.prepare("PRAGMA table_info(credit_accounts)").all();
+  if (!cols.some((c) => c.name === "remaining_limit_cents")) {
+    rawDb.exec("ALTER TABLE credit_accounts ADD COLUMN remaining_limit_cents INTEGER;");
+    rawDb.exec(
+      "UPDATE credit_accounts SET remaining_limit_cents = CASE WHEN category = 'credit_card' THEN MAX(0, credit_limit_cents - current_debt_cents) ELSE 0 END WHERE remaining_limit_cents IS NULL;"
+    );
+  }
   return {
     dialect: "sqlite",
     raw: rawDb,
@@ -278,6 +291,19 @@ async function createTursoAdapter(url, authToken) {
     ["PRAGMA foreign_keys = ON", ...SQLITE_DDL].map((sql) => ({ sql, args: [] })),
     "write"
   );
+  const info = await client.execute("PRAGMA table_info(credit_accounts)");
+  if (!info.rows.some((r) => r.name === "remaining_limit_cents")) {
+    await client.batch(
+      [
+        { sql: "ALTER TABLE credit_accounts ADD COLUMN remaining_limit_cents INTEGER", args: [] },
+        {
+          sql: "UPDATE credit_accounts SET remaining_limit_cents = CASE WHEN category = 'credit_card' THEN MAX(0, credit_limit_cents - current_debt_cents) ELSE 0 END WHERE remaining_limit_cents IS NULL",
+          args: [],
+        },
+      ],
+      "write"
+    );
+  }
   return {
     dialect: "turso",
     async get(sql, params = []) {

@@ -33,6 +33,15 @@ export function centsToInputYuan(cents) {
   return `${isNeg ? "-" : ""}${yuan}`;
 }
 
+export function parseYuanPreviewCents(raw) {
+  if (raw === null || raw === undefined) return null;
+  const cleaned = String(raw).trim().replace(/,/g, "").replace(/^¥/, "");
+  if (!cleaned) return null;
+  const num = Number(cleaned);
+  if (!Number.isFinite(num) || num < 0) return null;
+  return Math.round(num * 100);
+}
+
 export function pnlClass(cents) {
   const n = Number(cents || 0);
   if (n > 0) return "text-gain";

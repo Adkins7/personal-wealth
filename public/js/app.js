@@ -10,6 +10,7 @@ import {
   centsToInputYuan,
   escapeHtml,
   formatMoney,
+  parseYuanPreviewCents,
   pillClassForDelta,
   pnlClass,
 } from "./format.js";
@@ -705,8 +706,12 @@ function renderAccountsTab(container) {
               负债总额 <strong class="num ${
                 metrics.totalDebtCents > 0 ? "text-loss" : ""
               }">${formatMoney(metrics.totalDebtCents, { masked })}</strong>
-              · 信用卡总授信 <span class="num">${formatMoney(
+              · 总授信 <span class="num">${formatMoney(
                 metrics.totalCreditLimitCents,
+                { masked }
+              )}</span>
+              · 总剩余 <span class="num">${formatMoney(
+                metrics.totalCreditRemainingCents ?? 0,
                 { masked }
               )}</span>（仅展示）
             </p>
@@ -716,8 +721,11 @@ function renderAccountsTab(container) {
           </button>
         </div>
 
-        <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px;">
-          信用卡（多银行多卡 · 仅管授权额度与当前总欠款）
+        <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px;">
+          信用卡（填授权额度与云闪付剩余额度，自动计算欠款）
+        </div>
+        <div class="text-subtle" style="font-size:11.5px;margin-bottom:8px;">
+          提示：若同一家银行多张卡共享额度，建议合并录一条或只录主卡，避免重复计算欠款。
         </div>
         ${
           creditCards.length === 0
@@ -725,6 +733,8 @@ function renderAccountsTab(container) {
             : `<div class="account-list" style="margin-bottom:20px;">
                 ${creditCards
                   .map((c) => {
+                    const remCents = Number(c.remaining_limit_cents ?? 0);
+                    const overflowCents = Math.max(0, remCents - Number(c.credit_limit_cents));
                     const util =
                       c.credit_limit_cents > 0
                         ? Math.min(
@@ -746,8 +756,17 @@ function renderAccountsTab(container) {
                             }
                           </div>
                           <div class="account-sub num">
-                            授权额度 ${formatMoney(c.credit_limit_cents, { masked })}（仅展示）
+                            授信 ${formatMoney(c.credit_limit_cents, { masked })}
+                            · 剩余额度 <strong style="font-weight:500;color:var(--ink-secondary);">${formatMoney(
+                              remCents,
+                              { masked }
+                            )}</strong>
                             ${c.credit_limit_cents > 0 ? `· 已用 ${util}%` : ""}
+                            ${
+                              overflowCents > 0
+                                ? ` · 超出授信 ${formatMoney(overflowCents, { masked })}`
+                                : ""
+                            }
                           </div>
                           ${
                             c.credit_limit_cents > 0
@@ -762,12 +781,12 @@ function renderAccountsTab(container) {
                             <div class="account-amount num ${
                               c.current_debt_cents > 0 ? "text-loss" : ""
                             }">${formatMoney(c.current_debt_cents, { masked })}</div>
-                            <div class="account-pnl text-subtle">当前总欠款</div>
+                            <div class="account-pnl text-subtle">当前欠款</div>
                           </div>
                           <div style="display:flex;gap:2px;">
                             <button type="button" class="btn btn-ghost btn-sm" data-edit-credit="${
                               c.id
-                            }" title="修改欠款或额度">${icons.edit}</button>
+                            }" title="修改剩余额度或授信">${icons.edit}</button>
                             <button type="button" class="btn btn-danger-ghost btn-sm" data-del-credit="${
                               c.id
                             }" title="删除卡片">${icons.trash}</button>
@@ -1368,13 +1387,14 @@ function openQuickCheckinModal() {
           </div>
 
           <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px;">
-            信用付 / 负债当前总欠款（单位：元）
+            信用付 / 负债（信用卡填云闪付剩余额度，花呗/白条填当前欠款 · 单位：元）
           </div>
           <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px;">
             ${creditAccounts
-              .map(
-                (c) => `
-                <div style="display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:10px;align-items:center;">
+              .map((c) => {
+                const isCard = c.category === "credit_card";
+                return `
+                <div style="display:grid;grid-template-columns:1.25fr 0.95fr 1.1fr;gap:10px;align-items:center;">
                   <div style="font-size:13px;font-weight:500;">
                     ${escapeHtml(c.bank_or_platform)}
                     ${
@@ -1384,21 +1404,40 @@ function openQuickCheckinModal() {
                           )}</span>`
                         : ""
                     }
+                    <span class="pill pill-neutral" style="padding:1px 6px;font-size:10.5px;margin-left:4px;">
+                      ${isCard ? "填剩余额度" : "填欠款"}
+                    </span>
                   </div>
                   <div>
-                    <input class="input input-sm num" data-qcredit-debt="${
-                      c.id
-                    }" value="${centsToInputYuan(c.current_debt_cents)}" placeholder="当前欠款" />
-                  </div>
-                  <div class="text-subtle num" style="font-size:12px;padding-left:4px;">
                     ${
-                      c.category === "credit_card" && c.credit_limit_cents > 0
-                        ? `授信 ${formatMoney(c.credit_limit_cents)}`
-                        : ""
+                      isCard
+                        ? `<input class="input input-sm num" data-qcredit-rem="${
+                            c.id
+                          }" data-qcredit-limit="${
+                            c.credit_limit_cents
+                          }" value="${centsToInputYuan(
+                            c.remaining_limit_cents
+                          )}" placeholder="剩余可用额度" />`
+                        : `<input class="input input-sm num" data-qcredit-debt="${
+                            c.id
+                          }" value="${centsToInputYuan(
+                            c.current_debt_cents
+                          )}" placeholder="当前欠款" />`
                     }
                   </div>
-                </div>`
-              )
+                  <div class="text-subtle num" style="font-size:12px;padding-left:4px;" data-qcredit-preview="${
+                    c.id
+                  }">
+                    ${
+                      isCard
+                        ? `授信 ${formatMoney(c.credit_limit_cents)} → 欠款 <strong class="${
+                            c.current_debt_cents > 0 ? "text-loss" : ""
+                          }">${formatMoney(c.current_debt_cents)}</strong>`
+                        : "直接计入欠款"
+                    }
+                  </div>
+                </div>`;
+              })
               .join("")}
           </div>
 
@@ -1420,6 +1459,24 @@ function openQuickCheckinModal() {
 
   bindModalDismiss();
 
+  modalRoot.querySelectorAll("[data-qcredit-rem]").forEach((inp) => {
+    inp.addEventListener("input", () => {
+      const id = inp.getAttribute("data-qcredit-rem");
+      const limitCents = Number(inp.getAttribute("data-qcredit-limit") || 0);
+      const remCents = parseYuanPreviewCents(inp.value);
+      const previewEl = modalRoot.querySelector(`[data-qcredit-preview="${id}"]`);
+      if (!previewEl) return;
+      if (remCents === null) {
+        previewEl.innerHTML = `授信 ${formatMoney(limitCents)} → 请输入剩余额度`;
+        return;
+      }
+      const debtCents = Math.max(0, limitCents - remCents);
+      previewEl.innerHTML = `授信 ${formatMoney(limitCents)} → 欠款 <strong class="${
+        debtCents > 0 ? "text-loss" : ""
+      }">${formatMoney(debtCents)}</strong>`;
+    });
+  });
+
   document.getElementById("quick-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const errEl = document.getElementById("modal-err");
@@ -1436,6 +1493,13 @@ function openQuickCheckinModal() {
     });
 
     const credits = creditAccounts.map((c) => {
+      if (c.category === "credit_card") {
+        const remInput = modalRoot.querySelector(`[data-qcredit-rem="${c.id}"]`);
+        return {
+          id: c.id,
+          remaining_limit_yuan: remInput ? remInput.value : "0",
+        };
+      }
       const debtInput = modalRoot.querySelector(`[data-qcredit-debt="${c.id}"]`);
       return {
         id: c.id,
@@ -1631,14 +1695,22 @@ function openCreditModal(existing = null) {
           </div>
           <div class="form-field" id="credit-limit-wrap">
             <label class="form-label">授权额度（元，仅展示）</label>
-            <input class="input num" name="credit_limit_yuan" value="${
-              existing ? centsToInputYuan(existing.credit_limit_cents) : "0"
+            <input class="input num" id="credit-limit-input" name="credit_limit_yuan" value="${
+              existing ? centsToInputYuan(existing.credit_limit_cents) : ""
             }" placeholder="如 50000" />
-            <span class="form-hint">不计入负债或资产</span>
+            <span class="form-hint">卡片固定总额度，不计入负债或资产</span>
           </div>
-          <div class="form-field">
-            <label class="form-label">当前总欠款（元）</label>
-            <input class="input num" name="current_debt_yuan" required value="${
+          <div class="form-field" id="credit-remaining-wrap">
+            <label class="form-label">剩余额度（元，云闪付可用额度）</label>
+            <input class="input num" id="credit-remaining-input" name="remaining_limit_yuan" value="${
+              existing ? centsToInputYuan(existing.remaining_limit_cents) : ""
+            }" placeholder="如 46500" />
+            <span class="form-hint">系统将按「授权额度 − 剩余额度」自动算出欠款</span>
+          </div>
+          <div class="form-field full" id="credit-calc-preview" style="padding:10px 13px;border-radius:10px;background:var(--surface-subtle);border:1px solid var(--border);font-size:12.5px;"></div>
+          <div class="form-field full" id="credit-debt-wrap" style="display:none;">
+            <label class="form-label">当前欠款（元）</label>
+            <input class="input num" id="credit-debt-input" name="current_debt_yuan" value="${
               existing ? centsToInputYuan(existing.current_debt_cents) : "0"
             }" placeholder="0.00" />
           </div>
@@ -1659,10 +1731,44 @@ function openCreditModal(existing = null) {
   const customWrap = document.getElementById("credit-custom-bank-wrap");
   const customInput = document.getElementById("credit-custom-bank-input");
   const limitWrap = document.getElementById("credit-limit-wrap");
+  const limitInput = document.getElementById("credit-limit-input");
+  const remainingWrap = document.getElementById("credit-remaining-wrap");
+  const remainingInput = document.getElementById("credit-remaining-input");
+  const calcPreview = document.getElementById("credit-calc-preview");
+  const debtWrap = document.getElementById("credit-debt-wrap");
+
+  function updateDebtPreview() {
+    if (catSelect.value !== "credit_card") return;
+    const lim = parseYuanPreviewCents(limitInput.value);
+    const rem = parseYuanPreviewCents(remainingInput.value);
+    if (lim === null || rem === null) {
+      calcPreview.innerHTML = `<span class="text-muted">填写「授权额度」与「剩余额度」后，此处自动计算并展示当前欠款</span>`;
+      return;
+    }
+    const debt = Math.max(0, lim - rem);
+    const overflow = Math.max(0, rem - lim);
+    if (overflow > 0) {
+      calcPreview.innerHTML = `自动算得当前欠款：<strong class="num">¥0.00</strong> <span class="text-muted num">（剩余额度超出授信 ${formatMoney(
+        overflow
+      )}，按 0 欠款计入）</span>`;
+    } else {
+      calcPreview.innerHTML = `自动算得当前欠款：<strong class="num ${
+        debt > 0 ? "text-loss" : ""
+      }">${formatMoney(debt)}</strong> <span class="text-subtle num">（= 授权额度 ${formatMoney(
+        lim
+      )} − 剩余额度 ${formatMoney(rem)}）</span>`;
+    }
+  }
 
   function populateBankOptions(isInitial = false) {
     const v = catSelect.value;
-    limitWrap.style.display = v === "credit_card" ? "flex" : "none";
+    const isCard = v === "credit_card";
+    limitWrap.style.display = isCard ? "flex" : "none";
+    remainingWrap.style.display = isCard ? "flex" : "none";
+    calcPreview.style.display = isCard ? "block" : "none";
+    debtWrap.style.display = isCard ? "none" : "flex";
+    limitInput.required = isCard;
+    remainingInput.required = isCard;
 
     let presets = [];
     if (v === "credit_card") {
@@ -1696,6 +1802,7 @@ function openCreditModal(existing = null) {
       }</option>`;
 
     syncCustomInput();
+    updateDebtPreview();
   }
 
   function syncCustomInput() {
@@ -1712,6 +1819,8 @@ function openCreditModal(existing = null) {
     populateBankOptions(false);
   });
   bankSelect.addEventListener("change", syncCustomInput);
+  limitInput.addEventListener("input", updateDebtPreview);
+  remainingInput.addEventListener("input", updateDebtPreview);
 
   document.getElementById("credit-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -1726,17 +1835,25 @@ function openCreditModal(existing = null) {
       return;
     }
 
+    const selectedCat = catSelect.value;
+    const payloadBody = {
+      id: existing?.id,
+      category: selectedCat,
+      bank_or_platform: finalBank,
+      card_alias: fd.get("card_alias"),
+    };
+
+    if (selectedCat === "credit_card") {
+      payloadBody.credit_limit_yuan = fd.get("credit_limit_yuan");
+      payloadBody.remaining_limit_yuan = fd.get("remaining_limit_yuan");
+    } else {
+      payloadBody.current_debt_yuan = fd.get("current_debt_yuan");
+    }
+
     try {
       await apiFetch("/api/credit-accounts", {
         method: isEdit ? "PUT" : "POST",
-        body: {
-          id: existing?.id,
-          category: fd.get("category"),
-          bank_or_platform: finalBank,
-          card_alias: fd.get("card_alias"),
-          credit_limit_yuan: fd.get("credit_limit_yuan"),
-          current_debt_yuan: fd.get("current_debt_yuan"),
-        },
+        body: payloadBody,
       });
       closeModal();
       showToast(isEdit ? "信用账户已更新" : "已添加信用账户");

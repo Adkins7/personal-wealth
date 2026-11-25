@@ -261,11 +261,15 @@ export async function handleApiRequest(req, res, urlObj) {
       const saveSnapshot = Boolean(body.saveSnapshot);
 
       const db = await getDb();
-      const existingFunds = await db.all(
-        "SELECT id, category FROM fund_accounts WHERE user_id = ?",
-        [user.id]
-      );
+      const [existingFunds, existingCredits] = await Promise.all([
+        db.all("SELECT id, category FROM fund_accounts WHERE user_id = ?", [user.id]),
+        db.all(
+          "SELECT id, category, credit_limit_cents FROM credit_accounts WHERE user_id = ?",
+          [user.id]
+        ),
+      ]);
       const fundCatMap = new Map(existingFunds.map((f) => [Number(f.id), f.category]));
+      const creditMap = new Map(existingCredits.map((c) => [Number(c.id), c]));
       const now = getNowTimestampString();
       const statements = [];
 
@@ -284,12 +288,32 @@ export async function handleApiRequest(req, res, urlObj) {
 
       for (const c of credits) {
         const id = Number(c.id);
-        if (!id) continue;
-        const debt = yuanToCents(c.current_debt_yuan, false);
-        statements.push({
-          sql: `UPDATE credit_accounts SET current_debt_cents = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
-          params: [debt, now, id, user.id],
-        });
+        const existingCred = creditMap.get(id);
+        if (!existingCred) continue;
+
+        if (
+          existingCred.category === "credit_card" &&
+          c.remaining_limit_yuan !== undefined &&
+          c.remaining_limit_yuan !== ""
+        ) {
+          const limitCents = Number(existingCred.credit_limit_cents);
+          const remCents = yuanToCents(c.remaining_limit_yuan, false);
+          const debtCents = Math.max(0, limitCents - remCents);
+          statements.push({
+            sql: `UPDATE credit_accounts SET remaining_limit_cents = ?, current_debt_cents = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+            params: [remCents, debtCents, now, id, user.id],
+          });
+        } else {
+          const debt = yuanToCents(c.current_debt_yuan, false);
+          const rem =
+            existingCred.category === "credit_card"
+              ? Math.max(0, Number(existingCred.credit_limit_cents) - debt)
+              : 0;
+          statements.push({
+            sql: `UPDATE credit_accounts SET remaining_limit_cents = ?, current_debt_cents = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+            params: [rem, debt, now, id, user.id],
+          });
+        }
       }
 
       if (statements.length > 0) {
@@ -308,6 +332,37 @@ export async function handleApiRequest(req, res, urlObj) {
       const db = await getDb();
       const now = getNowTimestampString();
 
+      const resolveCreditAmounts = (category, body) => {
+        if (category !== "credit_card") {
+          return {
+            creditLimitCents: 0,
+            remainingLimitCents: 0,
+            currentDebtCents: yuanToCents(body.current_debt_yuan, false),
+          };
+        }
+        const rawLimit = String(body.credit_limit_yuan ?? "").trim();
+        if (rawLimit === "") {
+          throw new Error("请填写信用卡的授权额度");
+        }
+        const creditLimitCents = yuanToCents(rawLimit, false);
+        const rawRem =
+          body.remaining_limit_yuan !== undefined
+            ? String(body.remaining_limit_yuan).trim()
+            : "";
+
+        if (rawRem !== "") {
+          const remainingLimitCents = yuanToCents(rawRem, false);
+          const currentDebtCents = Math.max(0, creditLimitCents - remainingLimitCents);
+          return { creditLimitCents, remainingLimitCents, currentDebtCents };
+        }
+        if (body.current_debt_yuan !== undefined && String(body.current_debt_yuan).trim() !== "") {
+          const currentDebtCents = yuanToCents(body.current_debt_yuan, false);
+          const remainingLimitCents = Math.max(0, creditLimitCents - currentDebtCents);
+          return { creditLimitCents, remainingLimitCents, currentDebtCents };
+        }
+        throw new Error("请填写信用卡的剩余额度");
+      };
+
       if (method === "POST") {
         const body = await readJsonBody(req);
         const category = body.category;
@@ -324,20 +379,20 @@ export async function handleApiRequest(req, res, urlObj) {
             error: "隐私安全限制：请勿填写完整卡号（仅需记录卡片简称或后四位尾号）",
           });
         }
-        const creditLimitCents =
-          category === "credit_card" ? yuanToCents(body.credit_limit_yuan, false) : 0;
-        const currentDebtCents = yuanToCents(body.current_debt_yuan, false);
+        const { creditLimitCents, remainingLimitCents, currentDebtCents } =
+          resolveCreditAmounts(category, body);
 
         const inserted = await db.get(
           `INSERT INTO credit_accounts
-            (user_id, category, bank_or_platform, card_alias, credit_limit_cents, current_debt_cents, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+            (user_id, category, bank_or_platform, card_alias, credit_limit_cents, remaining_limit_cents, current_debt_cents, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
           [
             user.id,
             category,
             bankOrPlatform,
             cardAlias,
             creditLimitCents,
+            remainingLimitCents,
             currentDebtCents,
             now,
           ]
@@ -363,19 +418,19 @@ export async function handleApiRequest(req, res, urlObj) {
             error: "隐私安全限制：请勿填写完整卡号（仅需记录卡片简称或后四位尾号）",
           });
         }
-        const creditLimitCents =
-          category === "credit_card" ? yuanToCents(body.credit_limit_yuan, false) : 0;
-        const currentDebtCents = yuanToCents(body.current_debt_yuan, false);
+        const { creditLimitCents, remainingLimitCents, currentDebtCents } =
+          resolveCreditAmounts(category, body);
 
         const r = await db.run(
           `UPDATE credit_accounts
-           SET category = ?, bank_or_platform = ?, card_alias = ?, credit_limit_cents = ?, current_debt_cents = ?, updated_at = ?
+           SET category = ?, bank_or_platform = ?, card_alias = ?, credit_limit_cents = ?, remaining_limit_cents = ?, current_debt_cents = ?, updated_at = ?
            WHERE id = ? AND user_id = ?`,
           [
             category,
             bankOrPlatform,
             cardAlias,
             creditLimitCents,
+            remainingLimitCents,
             currentDebtCents,
             now,
             id,
@@ -772,7 +827,14 @@ export async function handleApiRequest(req, res, urlObj) {
         lines.push("");
         lines.push("# 信用付与负债账户");
         lines.push(
-          ["类型", "银行/平台", "备注", "授权额度(元)[仅展示]", "当前总欠款(元)"].join(",")
+          [
+            "类型",
+            "银行/平台",
+            "备注",
+            "授权额度(元)[仅展示]",
+            "剩余额度(元)[仅展示]",
+            "当前总欠款(元)",
+          ].join(",")
         );
         for (const c of payload.creditAccounts) {
           lines.push(
@@ -780,7 +842,10 @@ export async function handleApiRequest(req, res, urlObj) {
               c.category,
               csvEscape(c.bank_or_platform),
               csvEscape(c.card_alias),
-              centsToYuanString(c.credit_limit_cents),
+              c.category === "credit_card" ? centsToYuanString(c.credit_limit_cents) : "",
+              c.category === "credit_card"
+                ? centsToYuanString(c.remaining_limit_cents ?? 0)
+                : "",
               centsToYuanString(c.current_debt_cents),
             ].join(",")
           );
@@ -904,6 +969,8 @@ export async function captureSnapshotForDate(user, snapshotDate, note) {
       bank_or_platform: c.bank_or_platform,
       card_alias: c.card_alias,
       category: c.category,
+      credit_limit_cents: c.credit_limit_cents,
+      remaining_limit_cents: c.remaining_limit_cents,
       current_debt_cents: c.current_debt_cents,
     })),
   });

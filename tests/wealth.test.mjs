@@ -107,6 +107,19 @@ test("端到端核验：安全认证、权限隔离、防敏感卡号、资产�
   });
   assert.equal(fullCardRes.status, 400);
 
+  // 防呆校验：新建信用卡未填剩余额度应拦截
+  const missingRemRes = await alice.request("/api/credit-accounts", {
+    method: "POST",
+    body: {
+      category: "credit_card",
+      bank_or_platform: "招商银行",
+      card_alias: "测试卡",
+      credit_limit_yuan: "50000",
+    },
+  });
+  assert.equal(missingRemRes.status, 400);
+
+  // 招行卡：授信 50,000，剩余额度 46,799.50 => 自动算出欠款 3,200.50 元
   await alice.request("/api/credit-accounts", {
     method: "POST",
     body: {
@@ -114,21 +127,27 @@ test("端到端核验：安全认证、权限隔离、防敏感卡号、资产�
       bank_or_platform: "招商银行",
       card_alias: "经典白 · 尾号8821",
       credit_limit_yuan: "50000",
-      current_debt_yuan: "3200.50",
+      remaining_limit_yuan: "46799.50",
     },
   });
-  await alice.request("/api/credit-accounts", {
+  // 建行卡：先测溢缴款场景（授信 80,000，剩余额度 80,100 => 欠款按 0 计入）
+  const ccbCreate = await alice.request("/api/credit-accounts", {
     method: "POST",
     body: {
       category: "credit_card",
       bank_or_platform: "建设银行",
       card_alias: "大山白 · 尾号1099",
       credit_limit_yuan: "80000",
-      current_debt_yuan: "1799.50",
+      remaining_limit_yuan: "80100",
     },
   });
+  assert.equal(ccbCreate.status, 200);
 
   const initDash = (await alice.request("/api/dashboard")).data;
+  const ccbCard = initDash.creditAccounts.find((c) => c.bank_or_platform === "建设银行");
+  assert.equal(ccbCard.current_debt_cents, 0);
+  assert.equal(ccbCard.remaining_limit_cents, 8010000);
+
   const huabei = initDash.creditAccounts.find((c) => c.category === "huabei");
   const baitiao = initDash.creditAccounts.find((c) => c.category === "baitiao");
   const stock = initDash.fundAccounts.find((f) => f.category === "stock");
@@ -136,6 +155,7 @@ test("端到端核验：安全认证、权限隔离、防敏感卡号、资产�
   const debit = initDash.fundAccounts.find((f) => f.category === "debit_card");
   const wechat = initDash.fundAccounts.find((f) => f.category === "wechat_pay");
 
+  // 快速盘点：建行卡剩余额度改为 78,200.50 => 自动算出欠款 1,799.50 元；花呗/白条直接填欠款
   const quickRes = await alice.request("/api/quick-balances", {
     method: "POST",
     body: {
@@ -146,6 +166,7 @@ test("端到端核验：安全认证、权限隔离、防敏感卡号、资产�
         { id: wechat.id, balance_yuan: "10000", daily_pnl_yuan: "0" },
       ],
       credits: [
+        { id: ccbCard.id, remaining_limit_yuan: "78200.50" },
         { id: huabei.id, current_debt_yuan: "800" },
         { id: baitiao.id, current_debt_yuan: "200" },
       ],

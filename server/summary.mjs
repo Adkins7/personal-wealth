@@ -145,10 +145,12 @@ export async function getDashboardPayload(user, targetDate) {
 
   let totalDebtCents = 0;
   let totalCreditLimitCents = 0;
+  let totalCreditRemainingCents = 0;
   for (const acc of creditAccounts) {
     totalDebtCents += Number(acc.current_debt_cents);
     if (acc.category === "credit_card") {
       totalCreditLimitCents += Number(acc.credit_limit_cents);
+      totalCreditRemainingCents += Number(acc.remaining_limit_cents ?? 0);
     }
   }
 
@@ -242,6 +244,7 @@ export async function getDashboardPayload(user, targetDate) {
       totalFundsCents,
       totalDebtCents,
       totalCreditLimitCents,
+      totalCreditRemainingCents,
       dailyInvestmentPnlCents,
       stockBalanceCents,
       stockDailyPnlCents,
